@@ -12,10 +12,16 @@
     const startBtn = document.getElementById('start-btn');
     const buffsEl = document.getElementById('buffs');
     const pauseBtn = document.getElementById('pause-btn');
+    const soundBtn = document.getElementById('sound-btn');
 
     let W = 0, H = 0, DPR = 1;
 
-    const paddle = { w: 0, h: 0, x: 0, y: 0, targetX: 0, baseW: 0, hitFlash: 0 };
+    const paddle = {
+        w: 0, h: 0, x: 0, y: 0, targetX: 0, baseW: 0, hitFlash: 0,
+        // дуга
+        curvature: 0,    // 0..1 — насколько сильно изогнут
+        targetCurvature: 0
+    };
     const balls = [];
     const bricks = [];
     const particles = [];
@@ -30,7 +36,10 @@
     let level = 1;
     let lastTime = 0;
     let animationId = null;
-    let time = 0; // общий таймер для анимаций
+    let time = 0;
+
+    let totalBricksThisLevel = 0;   // сколько было изначально
+    let aliveBricksCount = 0;       // сколько сейчас
 
     const activeBuffs = { widen: 0, slow: 0, doubleScore: 0 };
 
@@ -44,7 +53,7 @@
         { type: 'multiBall',   color: '#9c27b0', symbol: 'M',  weight: 10 }
     ];
 
-    // ===== Звуки (Web Audio, без файлов) =====
+    // ===== Звуки =====
     let audioCtx = null;
     let soundEnabled = true;
     let masterGain = null;
@@ -62,7 +71,6 @@
         }
     }
 
-    // Возобновить контекст (iOS требует жест пользователя)
     function resumeAudio() {
         if (!audioCtx) initAudio();
         if (audioCtx && audioCtx.state === 'suspended') {
@@ -79,17 +87,14 @@
         const t0 = audioCtx.currentTime;
         const osc = audioCtx.createOscillator();
         const gain = audioCtx.createGain();
-
         osc.type = type;
         osc.frequency.setValueAtTime(freq, t0);
         if (slideTo) {
             osc.frequency.exponentialRampToValueAtTime(Math.max(1, slideTo), t0 + duration);
         }
-
         gain.gain.setValueAtTime(0, t0);
         gain.gain.linearRampToValueAtTime(0.6 * volume, t0 + 0.005);
         gain.gain.exponentialRampToValueAtTime(0.001, t0 + duration);
-
         osc.connect(gain);
         gain.connect(masterGain);
         osc.start(t0);
@@ -97,23 +102,24 @@
     }
 
     const SFX = {
-        paddle:  () => beep({ freq: 300, slideTo: 500, duration: 0.07, type: 'square', volume: 0.8 }),
-        brick:   () => beep({ freq: 700, slideTo: 1100, duration: 0.05, type: 'square', volume: 0.7 }),
+        paddle:   () => beep({ freq: 300, slideTo: 500, duration: 0.07, type: 'square', volume: 0.8 }),
+        brick:    () => beep({ freq: 700, slideTo: 1100, duration: 0.05, type: 'square', volume: 0.7 }),
         brickHard:() => beep({ freq: 400, slideTo: 300, duration: 0.06, type: 'sawtooth', volume: 0.7 }),
-        wall:    () => beep({ freq: 500, slideTo: 400, duration: 0.04, type: 'triangle', volume: 0.5 }),
-        powerup: () => {
+        wall:     () => beep({ freq: 500, slideTo: 400, duration: 0.04, type: 'triangle', volume: 0.5 }),
+        powerup:  () => {
             beep({ freq: 800, slideTo: 1400, duration: 0.12, type: 'square', volume: 0.9 });
             setTimeout(() => beep({ freq: 1200, slideTo: 1800, duration: 0.1, type: 'square', volume: 0.7 }), 70);
         },
-        lose:    () => {
-            beep({ freq: 300, slideTo: 80, duration: 0.4, type: 'sawtooth', volume: 1 });
-        },
-        win:     () => {
+        lose:     () => beep({ freq: 300, slideTo: 80, duration: 0.4, type: 'sawtooth', volume: 1 }),
+        win:      () => {
             [523, 659, 784, 1047].forEach((f, i) => {
                 setTimeout(() => beep({ freq: f, duration: 0.12, type: 'square', volume: 0.8 }), i * 90);
             });
-        }
+        },
+        bend:     () => beep({ freq: 220, slideTo: 440, duration: 0.15, type: 'sine', volume: 0.5 })
     };
+
+    let lastBendSoundTime = 0;
 
     // ===== Управление =====
     let lastPointerX = null;
@@ -153,7 +159,6 @@
         });
     }
 
-    // ===== Рандомная генерация кирпичей =====
     function createBricks() {
         bricks.length = 0;
         const bonusRows = Math.min(level - 1, 3);
@@ -163,22 +168,15 @@
         const brickW = (W - totalPadding) / BRICK_COLS;
         const brickH = 22;
 
-        // Плотность: на 1 уровне ~70%, дальше чуть плотнее
         const density = Math.min(0.7 + (level - 1) * 0.05, 0.95);
-        // Шанс "крепкого" кирпича (2-3 удара) — растёт с уровнем
         const hardChance = Math.min(0.05 + (level - 1) * 0.08, 0.4);
 
         for (let row = 0; row < rows; row++) {
             for (let col = 0; col < BRICK_COLS; col++) {
                 if (Math.random() > density) continue;
-
-                // Симметричный узор: иногда отражаем для красоты
                 let hp = 1;
-                if (Math.random() < hardChance) {
-                    hp = level >= 5 ? 3 : 2;
-                }
+                if (Math.random() < hardChance) hp = level >= 5 ? 3 : 2;
 
-                // Всегда оставляем минимум 3 кирпича в ряду сверху — иначе неинтересно
                 bricks.push({
                     col, row,
                     x: padding + col * (brickW + padding),
@@ -186,17 +184,14 @@
                     w: brickW,
                     h: brickH,
                     alive: true,
-                    hp,
-                    maxHp: hp,
+                    hp, maxHp: hp,
                     color: BRICK_COLORS[row % BRICK_COLORS.length],
-                    // Анимация появления
                     spawnAnim: 0,
                     spawnDelay: row * 0.05 + col * 0.015
                 });
             }
         }
 
-        // Гарантируем хотя бы 8 кирпичей — иначе уровень слишком пустой
         if (bricks.length < 8) {
             for (let row = 0; row < 3 && bricks.length < 8; row++) {
                 for (let col = 0; col < BRICK_COLS && bricks.length < 8; col++) {
@@ -208,8 +203,7 @@
                         w: brickW,
                         h: brickH,
                         alive: true,
-                        hp: 1,
-                        maxHp: 1,
+                        hp: 1, maxHp: 1,
                         color: BRICK_COLORS[row % BRICK_COLORS.length],
                         spawnAnim: 0,
                         spawnDelay: 0
@@ -217,6 +211,12 @@
                 }
             }
         }
+
+        totalBricksThisLevel = bricks.length;
+        aliveBricksCount = bricks.length;
+        // Сброс дуги на новом уровне
+        paddle.curvature = 0;
+        paddle.targetCurvature = 0;
     }
 
     function createBall(x, y) {
@@ -247,6 +247,8 @@
         particles.length = 0;
         powerups.length = 0;
         paddle.w = paddle.baseW;
+        paddle.curvature = 0;
+        paddle.targetCurvature = 0;
         updateHUD();
         createBricks();
         paddle.x = (W - paddle.w) / 2;
@@ -316,7 +318,52 @@
         if (activeBuffs.widen > 0) parts.push(`+${Math.ceil(activeBuffs.widen)}с`);
         if (activeBuffs.slow > 0) parts.push(`S ${Math.ceil(activeBuffs.slow)}с`);
         if (activeBuffs.doubleScore > 0) parts.push(`×2 ${Math.ceil(activeBuffs.doubleScore)}с`);
+        if (paddle.curvature > 0.05) parts.push(`⌒ ${Math.round(paddle.curvature * 100)}%`);
         buffsEl.textContent = parts.join('  ');
+    }
+
+    // ===== Формула кривизны =====
+    // Чем меньше кирпичей — тем сильнее изгиб.
+    // damage = 0 (всё цело) → curvature 0
+    // damage = 0.5 → начало изгиба
+    // damage = 1 (всё сломано) → curvature = 1 (максимум)
+    function computeTargetCurvature() {
+        if (totalBricksThisLevel === 0) return 0;
+        const damage = 1 - aliveBricksCount / totalBricksThisLevel;
+        // Начинаем гнуться после 40% разрушенных
+        const t = Math.max(0, (damage - 0.4) / 0.6);
+        return Math.min(1, t);
+    }
+
+    // Геометрия дуги платформы.
+    // Возвращает функцию y(x) и её производную dy/dx в мировой системе координат.
+    function paddleArc() {
+        const k = paddle.curvature;
+        const baseY = paddle.y + paddle.h / 2;
+        // Максимальная высота дуги — до 18% ширины платформы
+        const arcHeight = k * paddle.w * 0.35;
+        // t: 0..1 вдоль платформы
+        const cx = paddle.x + paddle.w / 2;
+        const halfW = paddle.w / 2;
+        return {
+            // Смещение вверх от центра
+            heightAt(worldX) {
+                if (halfW <= 0) return 0;
+                const t = (worldX - cx) / halfW;  // -1..1
+                // Парабола: -t^2 → максимум в центре (t=0)
+                // Нам нужна выпуклая вверх дуга: y = baseY - arcHeight*(1 - t^2)
+                return arcHeight * (1 - t * t);
+            },
+            // Производная (наклон касательной) в мировой точке
+            slopeAt(worldX) {
+                if (halfW <= 0) return 0;
+                const t = (worldX - cx) / halfW;
+                // d/dx [ arcHeight * (1 - t^2) ] , t = (x-cx)/halfW
+                // = arcHeight * (-2t) * (1/halfW)
+                return -arcHeight * 2 * t / halfW;
+            },
+            baseY
+        };
     }
 
     // ===== Бонусы =====
@@ -439,8 +486,7 @@
             }
         });
     }
-    
-    const soundBtn = document.getElementById('sound-btn');
+
     if (soundBtn) {
         soundBtn.addEventListener('click', (e) => {
             e.stopPropagation();
@@ -453,7 +499,7 @@
         });
     }
 
-    // ===== Физика =====
+    // ===== Обновление =====
     function update(dt) {
         time += dt;
         if (state !== 'playing') return;
@@ -475,7 +521,6 @@
                 buffsChanged = true;
             }
         }
-        if (buffsChanged) updateBuffsUI();
 
         // Клавиатура
         const keySpeed = W * 0.9;
@@ -484,27 +529,44 @@
         paddle.targetX = Math.max(0, Math.min(W - paddle.w, paddle.targetX));
         paddle.x = paddle.targetX;
 
+        // Обновляем целевую кривизну на основе оставшихся кирпичей
+        paddle.targetCurvature = computeTargetCurvature();
+        // Плавная интерполяция
+        const bendSpeed = 1.2; // скорость изгиба
+        const prevCurv = paddle.curvature;
+        if (paddle.curvature < paddle.targetCurvature) {
+            paddle.curvature = Math.min(paddle.targetCurvature, paddle.curvature + dt * bendSpeed);
+        } else if (paddle.curvature > paddle.targetCurvature) {
+            paddle.curvature = Math.max(paddle.targetCurvature, paddle.curvature - dt * bendSpeed);
+        }
+
+        // Звук при заметном изгибе (не чаще раза в 1.5 сек)
+        if (Math.abs(paddle.curvature - prevCurv) > 0.005 && time - lastBendSoundTime > 1.5) {
+            SFX.bend();
+            lastBendSoundTime = time;
+        }
+
+        if (buffsChanged || paddle.curvature > 0.05) updateBuffsUI();
+
         // Анимация появления кирпичей
         for (const b of bricks) {
             if (b.spawnAnim < 1) {
                 b.spawnDelay -= dt;
-                if (b.spawnDelay <= 0) {
-                    b.spawnAnim = Math.min(1, b.spawnAnim + dt * 4);
-                }
+                if (b.spawnDelay <= 0) b.spawnAnim = Math.min(1, b.spawnAnim + dt * 4);
             }
         }
 
-        // Вспышка платформы затухает
         if (paddle.hitFlash > 0) paddle.hitFlash = Math.max(0, paddle.hitFlash - dt * 4);
 
         const speedMul = activeBuffs.slow > 0 ? 0.75 : 1.0;
         const steps = 3;
         const subDt = (dt / steps) * speedMul;
 
+        const arc = paddleArc();
+
         for (let bi = balls.length - 1; bi >= 0; bi--) {
             const ball = balls[bi];
 
-            // Шлейф
             ball.trail.push({ x: ball.x, y: ball.y, life: 0.25 });
             if (ball.trail.length > 12) ball.trail.shift();
             for (let i = ball.trail.length - 1; i >= 0; i--) {
@@ -517,37 +579,61 @@
                 ball.y += ball.dy * subDt;
 
                 // Стены
-                if (ball.x - ball.r < 0) {
-                    ball.x = ball.r;
-                    ball.dx = Math.abs(ball.dx);
-                    SFX.wall();
-                }
-                if (ball.x + ball.r > W) {
-                    ball.x = W - ball.r;
-                    ball.dx = -Math.abs(ball.dx);
-                    SFX.wall();
-                }
-                if (ball.y - ball.r < 0) {
-                    ball.y = ball.r;
-                    ball.dy = Math.abs(ball.dy);
-                    SFX.wall();
-                }
+                if (ball.x - ball.r < 0) { ball.x = ball.r; ball.dx = Math.abs(ball.dx); SFX.wall(); }
+                if (ball.x + ball.r > W) { ball.x = W - ball.r; ball.dx = -Math.abs(ball.dx); SFX.wall(); }
+                if (ball.y - ball.r < 0) { ball.y = ball.r; ball.dy = Math.abs(ball.dy); SFX.wall(); }
 
-                // Платформа
+                // === Платформа-дуга ===
+                // Проверяем коллизию: если мяч летит вниз и его x в пределах платформы,
+                // а y находится между верхом дуги и низом платформы.
                 if (ball.dy > 0 &&
-                    ball.y + ball.r >= paddle.y &&
-                    ball.y - ball.r <= paddle.y + paddle.h &&
                     ball.x + ball.r >= paddle.x &&
                     ball.x - ball.r <= paddle.x + paddle.w) {
 
-                    ball.y = paddle.y - ball.r;
-                    const hit = (ball.x - (paddle.x + paddle.w / 2)) / (paddle.w / 2);
-                    const angle = (-Math.PI / 2) + hit * (Math.PI / 3);
-                    const speed = Math.hypot(ball.dx, ball.dy) * 1.02;
-                    ball.dx = Math.cos(angle) * speed;
-                    ball.dy = Math.sin(angle) * speed;
-                    paddle.hitFlash = 1;
-                    SFX.paddle();
+                    const arcTop = arc.baseY - arc.heightAt(ball.x);
+                    const paddleBottom = paddle.y + paddle.h;
+
+                    if (ball.y + ball.r >= arcTop &&
+                        ball.y - ball.r <= paddleBottom) {
+
+                        // Ставим мяч на верх дуги
+                        ball.y = arcTop - ball.r;
+
+                        // Наклон касательной к дуге в этой точке
+                        const slope = arc.slopeAt(ball.x); // dy/dx
+                        // Нормаль к кривой: (-slope, 1) нормализованная, направлена вверх
+                        const nLen = Math.hypot(-slope, 1);
+                        const nx = -slope / nLen;
+                        const ny = 1 / nLen;
+
+                        // Отражаем вектор скорости относительно нормали
+                        const dot = ball.dx * nx + ball.dy * ny;
+                        ball.dx = ball.dx - 2 * dot * nx;
+                        ball.dy = ball.dy - 2 * dot * ny;
+
+                        // Небольшой доворот от центра платформы (как раньше — влияет "хит")
+                        const hitPos = (ball.x - (paddle.x + paddle.w / 2)) / (paddle.w / 2);
+                        // Дополнительный доворот скорости — не больше 15%
+                        const extraAngle = hitPos * 0.25;
+                        const cos = Math.cos(extraAngle);
+                        const sin = Math.sin(extraAngle);
+                        const ndx = ball.dx * cos - ball.dy * sin;
+                        const ndy = ball.dx * sin + ball.dy * cos;
+                        ball.dx = ndx;
+                        ball.dy = ndy;
+
+                        // Ускорение
+                        const speed = Math.hypot(ball.dx, ball.dy) * 1.02;
+                        const ang = Math.atan2(ball.dy, ball.dx);
+                        ball.dx = Math.cos(ang) * speed;
+                        ball.dy = Math.sin(ang) * speed;
+
+                        // Гарантируем, что мяч отскочил вверх
+                        if (ball.dy > 0) ball.dy = -ball.dy;
+
+                        paddle.hitFlash = 1;
+                        SFX.paddle();
+                    }
                 }
 
                 // Кирпичи
@@ -571,15 +657,14 @@
                     b.hp--;
                     if (b.hp <= 0) {
                         b.alive = false;
+                        aliveBricksCount--;
                         const mult = activeBuffs.doubleScore > 0 ? 2 : 1;
-                        // За "крепкий" кирпич — больше очков
                         score += 10 * mult * b.maxHp;
                         updateHUD();
                         spawnParticles(b.x + b.w / 2, b.y + b.h / 2, b.color, 10 + b.maxHp * 3);
                         maybeSpawnPowerup(b.x + b.w / 2, b.y + b.h / 2);
                         SFX.brick();
                     } else {
-                        // Кирпич треснул, но жив
                         spawnParticles(ball.x, ball.y, b.color, 4);
                         SFX.brickHard();
                     }
@@ -587,9 +672,7 @@
                 }
             }
 
-            if (ball.y - ball.r > H) {
-                balls.splice(bi, 1);
-            }
+            if (ball.y - ball.r > H) balls.splice(bi, 1);
         }
 
         if (balls.length === 0) {
@@ -628,40 +711,31 @@
         }
 
         // Победа
-        if (bricks.every(b => !b.alive)) {
+        if (aliveBricksCount <= 0) {
             nextLevel();
         }
     }
 
     // ===== Отрисовка =====
     function drawBackground() {
-        // Градиентный фон
         const g = ctx.createRadialGradient(W / 2, H * 0.3, 50, W / 2, H * 0.3, Math.max(W, H) * 0.8);
         g.addColorStop(0, '#141433');
         g.addColorStop(1, '#0a0a1a');
         ctx.fillStyle = g;
         ctx.fillRect(0, 0, W, H);
 
-        // Медленно плывущая сетка
         ctx.strokeStyle = 'rgba(77, 208, 225, 0.06)';
         ctx.lineWidth = 1;
         const grid = 40;
         const ox = (time * 15) % grid;
         const oy = (time * 10) % grid;
         for (let x = -ox; x < W; x += grid) {
-            ctx.beginPath();
-            ctx.moveTo(x, 0);
-            ctx.lineTo(x, H);
-            ctx.stroke();
+            ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, H); ctx.stroke();
         }
         for (let y = -oy; y < H; y += grid) {
-            ctx.beginPath();
-            ctx.moveTo(0, y);
-            ctx.lineTo(W, y);
-            ctx.stroke();
+            ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke();
         }
 
-        // Верхняя подсветка "опасной зоны" (где мяч отскакивает от потолка)
         const topGlow = ctx.createLinearGradient(0, 0, 0, 40);
         topGlow.addColorStop(0, 'rgba(77, 208, 225, 0.15)');
         topGlow.addColorStop(1, 'rgba(77, 208, 225, 0)');
@@ -681,11 +755,9 @@
         ctx.scale(scale, scale);
         ctx.translate(-b.w / 2, -b.h / 2);
 
-        // Тень/свечение
         ctx.shadowColor = b.color;
         ctx.shadowBlur = 12;
 
-        // Градиент
         const g = ctx.createLinearGradient(0, 0, 0, b.h);
         g.addColorStop(0, lighten(b.color, 0.25));
         g.addColorStop(1, b.color);
@@ -695,12 +767,10 @@
         ctx.fill();
         ctx.shadowBlur = 0;
 
-        // Внутренняя светлая полоска сверху
         ctx.fillStyle = 'rgba(255,255,255,0.25)';
         roundRect(2, 2, b.w - 4, 3, 2);
         ctx.fill();
 
-        // Если крепкий — рисуем трещинки по количеству оставшихся hp
         if (b.maxHp > 1) {
             ctx.strokeStyle = 'rgba(0,0,0,0.4)';
             ctx.lineWidth = 1.5;
@@ -713,7 +783,6 @@
                 ctx.lineTo(cx - 2, b.h * 0.8);
                 ctx.stroke();
             }
-            // Метка с числом оставшихся ударов
             ctx.fillStyle = 'rgba(255,255,255,0.85)';
             ctx.font = 'bold 10px sans-serif';
             ctx.textAlign = 'center';
@@ -725,7 +794,6 @@
     }
 
     function drawBall(ball) {
-        // Шлейф
         for (let i = 0; i < ball.trail.length; i++) {
             const t = ball.trail[i];
             const a = (t.life / 0.25) * 0.4 * (i / ball.trail.length);
@@ -737,7 +805,6 @@
         }
         ctx.globalAlpha = 1;
 
-        // Свечение
         const g = ctx.createRadialGradient(ball.x, ball.y, 0, ball.x, ball.y, ball.r * 3);
         g.addColorStop(0, 'rgba(255, 255, 255, 1)');
         g.addColorStop(0.4, 'rgba(77, 208, 225, 0.8)');
@@ -747,7 +814,6 @@
         ctx.arc(ball.x, ball.y, ball.r * 3, 0, Math.PI * 2);
         ctx.fill();
 
-        // Ядро
         ctx.fillStyle = '#fff';
         ctx.beginPath();
         ctx.arc(ball.x, ball.y, ball.r, 0, Math.PI * 2);
@@ -756,21 +822,83 @@
 
     function drawPaddle() {
         const flash = paddle.hitFlash;
-        const g = ctx.createLinearGradient(paddle.x, 0, paddle.x + paddle.w, 0);
-        g.addColorStop(0, '#4dd0e1');
-        g.addColorStop(1, '#9c27b0');
+        const k = paddle.curvature;
 
         ctx.shadowColor = flash > 0 ? '#ffffff' : '#4dd0e1';
         ctx.shadowBlur = 15 + flash * 25;
+
+        if (k < 0.02) {
+            // Плоская платформа — как раньше
+            const g = ctx.createLinearGradient(paddle.x, 0, paddle.x + paddle.w, 0);
+            g.addColorStop(0, '#4dd0e1');
+            g.addColorStop(1, '#9c27b0');
+            ctx.fillStyle = g;
+            roundRect(paddle.x, paddle.y, paddle.w, paddle.h, paddle.h / 2);
+            ctx.fill();
+            ctx.shadowBlur = 0;
+
+            ctx.fillStyle = 'rgba(255,255,255,' + (0.3 + flash * 0.5) + ')';
+            roundRect(paddle.x + 4, paddle.y + 2, paddle.w - 8, 3, 2);
+            ctx.fill();
+            return;
+        }
+
+        // === Дуга ===
+        const arc = paddleArc();
+        const baseY = paddle.y + paddle.h;   // низ дуги — там, где "основание"
+        const thickness = paddle.h;
+
+        // Нарисуем платформу как заполненную область между двумя параболами:
+        // верхняя: baseY - arcHeight*(1 - t^2)
+        // нижняя: baseY - arcHeight*(1 - t^2) + thickness
+        // Используем путь по точкам.
+
+        const N = 24;
+        const pts = [];
+        const cx = paddle.x + paddle.w / 2;
+        const halfW = paddle.w / 2;
+
+        // Верхняя кромка слева направо
+        for (let i = 0; i <= N; i++) {
+            const x = paddle.x + (paddle.w * i / N);
+            const t = (x - cx) / halfW;
+            const up = k * paddle.w * 0.35 * (1 - t * t);
+            pts.push({ x, y: baseY - up - thickness });
+        }
+        // Нижняя кромка справа налево
+        for (let i = N; i >= 0; i--) {
+            const x = paddle.x + (paddle.w * i / N);
+            const t = (x - cx) / halfW;
+            const up = k * paddle.w * 0.35 * (1 - t * t);
+            pts.push({ x, y: baseY - up });
+        }
+
+        // Градиент по ширине
+        const g = ctx.createLinearGradient(paddle.x, 0, paddle.x + paddle.w, 0);
+        g.addColorStop(0, '#4dd0e1');
+        g.addColorStop(1, '#9c27b0');
         ctx.fillStyle = g;
-        roundRect(paddle.x, paddle.y, paddle.w, paddle.h, paddle.h / 2);
+
+        ctx.beginPath();
+        ctx.moveTo(pts[0].x, pts[0].y);
+        for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i].x, pts[i].y);
+        ctx.closePath();
         ctx.fill();
         ctx.shadowBlur = 0;
 
-        // Блик
-        ctx.fillStyle = 'rgba(255,255,255,' + (0.3 + flash * 0.5) + ')';
-        roundRect(paddle.x + 4, paddle.y + 2, paddle.w - 8, 3, 2);
-        ctx.fill();
+        // Верхний блик — тонкая линия по верхней кромке
+        ctx.strokeStyle = 'rgba(255,255,255,' + (0.4 + flash * 0.5) + ')';
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        for (let i = 0; i <= N; i++) {
+            const x = paddle.x + (paddle.w * i / N);
+            const t = (x - cx) / halfW;
+            const up = k * paddle.w * 0.35 * (1 - t * t);
+            const y = baseY - up - thickness + 2;
+            if (i === 0) ctx.moveTo(x, y);
+            else ctx.lineTo(x, y);
+        }
+        ctx.stroke();
     }
 
     function drawPowerup(p) {
@@ -786,7 +914,6 @@
         ctx.fill();
         ctx.shadowBlur = 0;
 
-        // Обводка
         ctx.strokeStyle = 'rgba(255,255,255,0.6)';
         ctx.lineWidth = 1.5;
         roundRect(-p.w / 2 + 1, -p.h / 2 + 1, p.w - 2, p.h - 2, 5);
@@ -803,23 +930,11 @@
 
     function render() {
         drawBackground();
-
-        // Кирпичи
-        for (const b of bricks) {
-            if (!b.alive) continue;
-            drawBrick(b);
-        }
-
-        // Бонусы
+        for (const b of bricks) if (b.alive) drawBrick(b);
         for (const p of powerups) drawPowerup(p);
-
-        // Платформа
         drawPaddle();
-
-        // Мячи
         for (const ball of balls) drawBall(ball);
 
-        // Частицы
         for (const p of particles) {
             const alpha = Math.max(0, p.life / p.maxLife);
             ctx.globalAlpha = alpha;
