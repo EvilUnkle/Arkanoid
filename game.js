@@ -439,6 +439,19 @@
             }
         });
     }
+    
+    const soundBtn = document.getElementById('sound-btn');
+    if (soundBtn) {
+        soundBtn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            soundEnabled = !soundEnabled;
+            soundBtn.textContent = soundEnabled ? '🔊' : '🔇';
+            if (soundEnabled) {
+                resumeAudio();
+                SFX.paddle();
+            }
+        });
+    }
 
     // ===== Физика =====
     function update(dt) {
