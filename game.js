@@ -360,7 +360,7 @@
                 const t = (worldX - cx) / halfW;
                 // d/dx [ arcHeight * (1 - t^2) ] , t = (x-cx)/halfW
                 // = arcHeight * (-2t) * (1/halfW)
-                return -arcHeight * 2 * t / halfW;
+                return arcHeight * 2 * t / halfW;
             },
             baseY
         };
