@@ -826,4 +826,50 @@
         ctx.moveTo(x + r, y);
         ctx.arcTo(x + w, y, x + w, y + h, r);
         ctx.arcTo(x + w, y + h, x, y + h, r);
-        ctx.arcTo(x, y + h, x, y,
+        ctx.arcTo(x, y + h, x, y, r);
+        ctx.arcTo(x, y, x + w, y, r);
+        ctx.closePath();
+    }
+
+    function easeOutBack(t) {
+        const c1 = 1.70158;
+        const c3 = c1 + 1;
+        return 1 + c3 * Math.pow(t - 1, 3) + c1 * Math.pow(t - 1, 2);
+    }
+
+    function lighten(hex, amount) {
+        const c = hex.replace('#', '');
+        const r = parseInt(c.substring(0, 2), 16);
+        const g = parseInt(c.substring(2, 4), 16);
+        const b = parseInt(c.substring(4, 6), 16);
+        const lr = Math.round(r + (255 - r) * amount);
+        const lg = Math.round(g + (255 - g) * amount);
+        const lb = Math.round(b + (255 - b) * amount);
+        return `rgb(${lr},${lg},${lb})`;
+    }
+
+    function loop(now) {
+        const dt = Math.min((now - lastTime) / 1000, 0.033);
+        lastTime = now;
+        update(dt);
+        render();
+        if (state === 'playing' || state === 'paused') {
+            animationId = requestAnimationFrame(loop);
+        }
+    }
+
+    startBtn.addEventListener('click', startGame);
+    window.addEventListener('resize', resize);
+    window.addEventListener('orientationchange', () => setTimeout(resize, 200));
+
+    resize();
+    render();
+
+    document.addEventListener('visibilitychange', () => {
+        if (document.hidden && state === 'playing') {
+            state = 'paused';
+            if (pauseBtn) pauseBtn.textContent = '▶';
+            cancelAnimationFrame(animationId);
+        }
+    });
+})();
