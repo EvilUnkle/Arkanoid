@@ -14,14 +14,14 @@
     let W = 0, H = 0, DPR = 1;
 
     // Игровые объекты
-    const paddle = { w: 0, h: 0, x: 0, y: 0, speed: 0, targetX: 0 };
+    const paddle = { w: 0, h: 0, x: 0, y: 0, targetX: 0 };
     const ball = { x: 0, y: 0, r: 0, dx: 0, dy: 0, speed: 0 };
     const bricks = [];
     const BRICK_COLS = 8;
     const BRICK_ROWS = 5;
 
     // Состояние
-    let state = 'idle'; // idle | playing | paused | gameover | win
+    let state = 'idle'; // idle | playing | paused | gameover
     let score = 0;
     let lives = 3;
     let level = 1;
@@ -30,6 +30,10 @@
 
     // Цвета кирпичей по ряду
     const BRICK_COLORS = ['#ff5252', '#ff9800', '#ffeb3b', '#4caf50', '#4dd0e1'];
+
+    // ===== Управление (относительное) =====
+    let lastPointerX = null;
+    const keys = {};
 
     function resize() {
         const rect = canvas.getBoundingClientRect();
@@ -40,12 +44,9 @@
         canvas.height = H * DPR;
         ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
 
-        // Пересчёт размеров при изменении
         paddle.w = Math.max(70, W * 0.22);
         paddle.h = 12;
         paddle.y = H - 40 - paddle.h;
-        paddle.speed = W * 1.2;
-        if (paddle.targetX === 0) paddle.x = (W - paddle.w) / 2;
 
         ball.r = Math.max(6, W * 0.014);
         ball.speed = Math.min(W, H) * 0.7;
@@ -76,10 +77,10 @@
         bricks.length = 0;
         const bonusRows = Math.min(level - 1, 3);
         const rows = BRICK_ROWS + bonusRows;
-        const totalPadding = 8 * (BRICK_COLS + 1);
+        const padding = 8;
+        const totalPadding = padding * (BRICK_COLS + 1);
         const brickW = (W - totalPadding) / BRICK_COLS;
         const brickH = 22;
-        const padding = 8;
 
         for (let row = 0; row < rows; row++) {
             for (let col = 0; col < BRICK_COLS; col++) {
@@ -89,8 +90,7 @@
                     w: brickW,
                     h: brickH,
                     alive: true,
-                    color: BRICK_COLORS[row % BRICK_COLORS.length],
-                    hits: 1
+                    color: BRICK_COLORS[row % BRICK_COLORS.length]
                 });
             }
         }
@@ -153,25 +153,35 @@
         levelEl.textContent = level;
     }
 
-    // ===== Управление =====
-    function setPaddleTarget(clientX) {
-        const rect = canvas.getBoundingClientRect();
-        const x = clientX - rect.left;
-        paddle.targetX = x - paddle.w / 2;
-    }
-
-    canvas.addEventListener('pointermove', (e) => {
-        if (state === 'playing' || state === 'paused') {
-            setPaddleTarget(e.clientX);
+    // ===== Относительное управление пальцем =====
+    // Палец двигается на Δx → платформа двигается на Δx * sensitivity.
+    // Позиция пальца на экране значения не имеет.
+    canvas.addEventListener('pointerdown', (e) => {
+        if (state !== 'playing' && state !== 'paused') return;
+        lastPointerX = e.clientX;
+        if (canvas.setPointerCapture) {
+            try { canvas.setPointerCapture(e.pointerId); } catch (_) {}
         }
     });
 
-    canvas.addEventListener('pointerdown', (e) => {
-        if (state === 'playing') setPaddleTarget(e.clientX);
+    canvas.addEventListener('pointermove', (e) => {
+        if ((state !== 'playing' && state !== 'paused') || lastPointerX === null) return;
+
+        const dx = e.clientX - lastPointerX;
+        lastPointerX = e.clientX;
+
+        const sensitivity = 1.3; // 1.0 = 1:1, больше = быстрее реакция
+        paddle.targetX += dx * sensitivity;
+        paddle.targetX = Math.max(0, Math.min(W - paddle.w, paddle.targetX));
+        paddle.x = paddle.targetX;
     });
 
-    // Клавиатура для десктопа
-    const keys = {};
+    const endPointer = () => { lastPointerX = null; };
+    canvas.addEventListener('pointerup', endPointer);
+    canvas.addEventListener('pointercancel', endPointer);
+    canvas.addEventListener('pointerleave', endPointer);
+
+    // Клавиатура (десктоп)
     window.addEventListener('keydown', (e) => {
         keys[e.key] = true;
         if (e.key === ' ') e.preventDefault();
@@ -182,19 +192,20 @@
     function update(dt) {
         if (state !== 'playing') return;
 
-        // Клавиатура
+        // Клавиатура — относительное движение
+        const keySpeed = W * 0.9;
         if (keys['ArrowLeft'] || keys['a'] || keys['A']) {
-            paddle.targetX -= paddle.speed * dt * 1.5;
+            paddle.targetX -= keySpeed * dt;
         }
         if (keys['ArrowRight'] || keys['d'] || keys['D']) {
-            paddle.targetX += paddle.speed * dt * 1.5;
+            paddle.targetX += keySpeed * dt;
         }
+        paddle.targetX = Math.max(0, Math.min(W - paddle.w, paddle.targetX));
 
-        // Плавное движение платформы
-        paddle.x += (paddle.targetX - paddle.x) * Math.min(1, dt * 20);
-        paddle.x = Math.max(0, Math.min(W - paddle.w, paddle.x));
+        // Синхронизация: тач уже установил paddle.x = paddle.targetX
+        paddle.x = paddle.targetX;
 
-        // Движение мяча с подшаговой точностью (чтобы не пролетать сквозь)
+        // Движение мяча с подшагами (чтобы не пролетал сквозь)
         const steps = 3;
         const subDt = dt / steps;
         for (let s = 0; s < steps; s++) {
@@ -223,7 +234,6 @@
                 ball.x - ball.r <= paddle.x + paddle.w) {
 
                 ball.y = paddle.y - ball.r;
-                // Отскок зависит от точки удара
                 const hit = (ball.x - (paddle.x + paddle.w / 2)) / (paddle.w / 2);
                 const angle = (-Math.PI / 2) + hit * (Math.PI / 3);
                 const speed = Math.hypot(ball.dx, ball.dy) * 1.02;
@@ -237,7 +247,6 @@
                 if (ball.x + ball.r < b.x || ball.x - ball.r > b.x + b.w ||
                     ball.y + ball.r < b.y || ball.y - ball.r > b.y + b.h) continue;
 
-                // Определяем сторону столкновения
                 const overlapLeft = (ball.x + ball.r) - b.x;
                 const overlapRight = (b.x + b.w) - (ball.x - ball.r);
                 const overlapTop = (ball.y + ball.r) - b.y;
@@ -263,18 +272,17 @@
             return;
         }
 
-        // Проверка победы
+        // Победа на уровне
         if (bricks.every(b => !b.alive)) {
             nextLevel();
         }
     }
 
     function render() {
-        // Фон
         ctx.fillStyle = '#0a0a1a';
         ctx.fillRect(0, 0, W, H);
 
-        // Сетка для красоты
+        // Сетка
         ctx.strokeStyle = 'rgba(77, 208, 225, 0.05)';
         ctx.lineWidth = 1;
         const grid = 40;
@@ -344,18 +352,15 @@
     }
 
     // ===== Старт =====
-    startBtn.addEventListener('click', () => {
-        startGame();
-    });
+    startBtn.addEventListener('click', startGame);
 
     window.addEventListener('resize', resize);
     window.addEventListener('orientationchange', () => setTimeout(resize, 200));
 
-    // Инициализация
     resize();
     render();
 
-    // Пауза при потере фокуса
+    // Пауза при сворачивании
     document.addEventListener('visibilitychange', () => {
         if (document.hidden && state === 'playing') {
             state = 'paused';
