@@ -28,12 +28,16 @@ html, body {
     display: flex;
     justify-content: space-between;
     align-items: center;
-    padding: 12px 16px;
-    font-size: 14px;
+    padding: 10px 12px;
+    font-size: 13px;
     background: rgba(255, 255, 255, 0.05);
     backdrop-filter: blur(10px);
     border-bottom: 1px solid rgba(255, 255, 255, 0.1);
-    gap: 8px;
+    gap: 6px;
+}
+
+#hud span {
+    white-space: nowrap;
 }
 
 #hud b {
@@ -127,6 +131,48 @@ html, body {
 }
 
 /* Индикатор активных бонусов */
+#buffs {
+    text-align: center;
+    font-size: 12px;
+    color: #4dd0e1;
+    padding: 4px 0;
+    min-height: 20px;
+    letter-spacing: 0.5px;
+    background: rgba(77, 208, 225, 0.05);
+    transition: background 0.2s;
+}
+
+#buffs:not(:empty) {
+    background: rgba(77, 208, 225, 0.08);
+}
+
+/* Общая кнопка в HUD (звук и пауза) */
+#pause-btn,
+#sound-btn {
+    background: rgba(255, 255, 255, 0.08);
+    border: 1px solid rgba(255, 255, 255, 0.15);
+    color: #4dd0e1;
+    font-size: 15px;
+    width: 32px;
+    height: 32px;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    padding: 0;
+    line-height: 1;
+    -webkit-tap-highlight-color: transparent;
+    flex-shrink: 0;
+}
+
+#pause-btn:active,
+#sound-btn:active {
+    transform: scale(0.92);
+    background: rgba(77, 208, 225, 0.15);
+}
+
+/* Индикатор бонусов */
 #buffs {
     text-align: center;
     font-size: 12px;
