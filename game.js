@@ -18,14 +18,13 @@
 
     const paddle = {
         w: 0, h: 0, x: 0, y: 0, targetX: 0, baseW: 0, hitFlash: 0,
-        // дуга
-        curvature: 0,    // 0..1 — насколько сильно изогнут
-        targetCurvature: 0
+        curvature: 0, targetCurvature: 0
     };
     const balls = [];
     const bricks = [];
     const particles = [];
     const powerups = [];
+    const bullets = [];   // вражеские снаряды
 
     const BRICK_COLS = 8;
     const BRICK_ROWS = 5;
@@ -38,19 +37,20 @@
     let animationId = null;
     let time = 0;
 
-    let totalBricksThisLevel = 0;   // сколько было изначально
-    let aliveBricksCount = 0;       // сколько сейчас
+    let totalBricksThisLevel = 0;
+    let aliveBricksCount = 0;
 
-    const activeBuffs = { widen: 0, slow: 0, doubleScore: 0 };
+    const activeBuffs = { widen: 0, slow: 0, doubleScore: 0, shield: 0 };
 
     const BRICK_COLORS = ['#ff5252', '#ff9800', '#ffeb3b', '#4caf50', '#4dd0e1'];
 
     const POWERUP_TYPES = [
-        { type: 'widen',       color: '#4caf50', symbol: '+',  weight: 30 },
-        { type: 'life',        color: '#ff5252', symbol: '♥',  weight: 15 },
-        { type: 'slow',        color: '#4dd0e1', symbol: 'S',  weight: 25 },
-        { type: 'doubleScore', color: '#ffeb3b', symbol: '×2', weight: 20 },
-        { type: 'multiBall',   color: '#9c27b0', symbol: 'M',  weight: 10 }
+        { type: 'widen',       color: '#4caf50', symbol: '+',  weight: 25 },
+        { type: 'life',        color: '#ff5252', symbol: '♥',  weight: 12 },
+        { type: 'slow',        color: '#4dd0e1', symbol: 'S',  weight: 20 },
+        { type: 'doubleScore', color: '#ffeb3b', symbol: '×2', weight: 18 },
+        { type: 'multiBall',   color: '#9c27b0', symbol: 'M',  weight: 10 },
+        { type: 'shield',      color: '#29b6f6', symbol: '⚡', weight: 15 }
     ];
 
     // ===== Звуки =====
@@ -66,9 +66,7 @@
             masterGain = audioCtx.createGain();
             masterGain.gain.value = 0.35;
             masterGain.connect(audioCtx.destination);
-        } catch (_) {
-            soundEnabled = false;
-        }
+        } catch (_) { soundEnabled = false; }
     }
 
     function resumeAudio() {
@@ -81,17 +79,14 @@
     function beep({ freq = 440, duration = 0.08, type = 'square', volume = 1, slideTo = null }) {
         if (!soundEnabled) return;
         if (!audioCtx) initAudio();
-        if (!audioCtx) return;
-        if (audioCtx.state === 'suspended') return;
+        if (!audioCtx || audioCtx.state === 'suspended') return;
 
         const t0 = audioCtx.currentTime;
         const osc = audioCtx.createOscillator();
         const gain = audioCtx.createGain();
         osc.type = type;
         osc.frequency.setValueAtTime(freq, t0);
-        if (slideTo) {
-            osc.frequency.exponentialRampToValueAtTime(Math.max(1, slideTo), t0 + duration);
-        }
+        if (slideTo) osc.frequency.exponentialRampToValueAtTime(Math.max(1, slideTo), t0 + duration);
         gain.gain.setValueAtTime(0, t0);
         gain.gain.linearRampToValueAtTime(0.6 * volume, t0 + 0.005);
         gain.gain.exponentialRampToValueAtTime(0.001, t0 + duration);
@@ -116,7 +111,13 @@
                 setTimeout(() => beep({ freq: f, duration: 0.12, type: 'square', volume: 0.8 }), i * 90);
             });
         },
-        bend:     () => beep({ freq: 220, slideTo: 440, duration: 0.15, type: 'sine', volume: 0.5 })
+        bend:     () => beep({ freq: 220, slideTo: 440, duration: 0.15, type: 'sine', volume: 0.5 }),
+        shoot:    () => beep({ freq: 200, slideTo: 100, duration: 0.1, type: 'sawtooth', volume: 0.5 }),
+        hitShield:() => beep({ freq: 900, slideTo: 1600, duration: 0.08, type: 'sine', volume: 0.7 }),
+        enemyBreak:() => {
+            beep({ freq: 500, slideTo: 200, duration: 0.15, type: 'sawtooth', volume: 0.8 });
+            setTimeout(() => beep({ freq: 300, slideTo: 100, duration: 0.1, type: 'square', volume: 0.5 }), 40);
+        }
     };
 
     let lastBendSoundTime = 0;
@@ -161,6 +162,8 @@
 
     function createBricks() {
         bricks.length = 0;
+        bullets.length = 0;
+
         const bonusRows = Math.min(level - 1, 3);
         const rows = BRICK_ROWS + bonusRows;
         const padding = 8;
@@ -170,10 +173,37 @@
 
         const density = Math.min(0.7 + (level - 1) * 0.05, 0.95);
         const hardChance = Math.min(0.05 + (level - 1) * 0.08, 0.4);
+        // Шанс врага — с уровня 2, ~7%
+        const enemyChance = level >= 2 ? Math.min(0.06 + (level - 2) * 0.02, 0.18) : 0;
 
+        // Враги не могут быть в самом нижнем ряду (иначе сразу стреляют)
         for (let row = 0; row < rows; row++) {
             for (let col = 0; col < BRICK_COLS; col++) {
                 if (Math.random() > density) continue;
+
+                // Враг только в верхних рядах (не последний и не предпоследний)
+                const canBeEnemy = row < rows - 2;
+
+                if (canBeEnemy && Math.random() < enemyChance) {
+                    bricks.push({
+                        col, row,
+                        x: padding + col * (brickW + padding),
+                        y: 20 + row * (brickH + padding),
+                        w: brickW,
+                        h: brickH,
+                        alive: true,
+                        hp: 1, maxHp: 1,
+                        color: '#ff1744',
+                        isEnemy: true,
+                        fireCooldown: 2 + Math.random() * 3,   // первый выстрел через 2-5 сек
+                        fireInterval: 3 + Math.random() * 2,    // дальше каждые 3-5 сек
+                        pulse: Math.random() * Math.PI * 2,
+                        spawnAnim: 0,
+                        spawnDelay: row * 0.05 + col * 0.015
+                    });
+                    continue;
+                }
+
                 let hp = 1;
                 if (Math.random() < hardChance) hp = level >= 5 ? 3 : 2;
 
@@ -186,6 +216,7 @@
                     alive: true,
                     hp, maxHp: hp,
                     color: BRICK_COLORS[row % BRICK_COLORS.length],
+                    isEnemy: false,
                     spawnAnim: 0,
                     spawnDelay: row * 0.05 + col * 0.015
                 });
@@ -205,6 +236,7 @@
                         alive: true,
                         hp: 1, maxHp: 1,
                         color: BRICK_COLORS[row % BRICK_COLORS.length],
+                        isEnemy: false,
                         spawnAnim: 0,
                         spawnDelay: 0
                     });
@@ -214,9 +246,18 @@
 
         totalBricksThisLevel = bricks.length;
         aliveBricksCount = bricks.length;
-        // Сброс дуги на новом уровне
         paddle.curvature = 0;
         paddle.targetCurvature = 0;
+    }
+
+    // Проверка: есть ли между врагом и платформой свободный путь вниз
+    function hasClearPathToBottom(brick) {
+        // Ищем любой живой кирпич в той же колонке ниже этого
+        for (const other of bricks) {
+            if (!other.alive) continue;
+            if (other.col === brick.col && other.row > brick.row) return false;
+        }
+        return true;
     }
 
     function createBall(x, y) {
@@ -244,8 +285,10 @@
         activeBuffs.widen = 0;
         activeBuffs.slow = 0;
         activeBuffs.doubleScore = 0;
+        activeBuffs.shield = 0;
         particles.length = 0;
         powerups.length = 0;
+        bullets.length = 0;
         paddle.w = paddle.baseW;
         paddle.curvature = 0;
         paddle.targetCurvature = 0;
@@ -268,10 +311,12 @@
         activeBuffs.widen = 0;
         activeBuffs.slow = 0;
         activeBuffs.doubleScore = 0;
+        activeBuffs.shield = 0;
         paddle.w = paddle.baseW;
         paddle.x = Math.min(paddle.x, W - paddle.w);
         paddle.targetX = paddle.x;
         powerups.length = 0;
+        bullets.length = 0;
         updateHUD();
         createBricks();
         resetBall();
@@ -291,9 +336,11 @@
             activeBuffs.widen = 0;
             activeBuffs.slow = 0;
             activeBuffs.doubleScore = 0;
+            activeBuffs.shield = 0;
             paddle.w = paddle.baseW;
             paddle.x = Math.min(paddle.x, W - paddle.w);
             paddle.targetX = paddle.x;
+            bullets.length = 0;
             resetBall();
             updateBuffsUI();
         }
@@ -318,48 +365,33 @@
         if (activeBuffs.widen > 0) parts.push(`+${Math.ceil(activeBuffs.widen)}с`);
         if (activeBuffs.slow > 0) parts.push(`S ${Math.ceil(activeBuffs.slow)}с`);
         if (activeBuffs.doubleScore > 0) parts.push(`×2 ${Math.ceil(activeBuffs.doubleScore)}с`);
+        if (activeBuffs.shield > 0) parts.push(`⚡ ${Math.ceil(activeBuffs.shield)}с`);
         if (paddle.curvature > 0.05) parts.push(`⌒ ${Math.round(paddle.curvature * 100)}%`);
         buffsEl.textContent = parts.join('  ');
     }
 
-    // ===== Формула кривизны =====
-    // Чем меньше кирпичей — тем сильнее изгиб.
-    // damage = 0 (всё цело) → curvature 0
-    // damage = 0.5 → начало изгиба
-    // damage = 1 (всё сломано) → curvature = 1 (максимум)
     function computeTargetCurvature() {
         if (totalBricksThisLevel === 0) return 0;
         const damage = 1 - aliveBricksCount / totalBricksThisLevel;
-        // Начинаем гнуться после 40% разрушенных
-        const t = Math.max(0, (damage - 0.4) / 0.6);
-        return Math.min(1, t);
+        const t = Math.max(0, Math.min(1, damage / 0.7));
+        return t;
     }
 
-    // Геометрия дуги платформы.
-    // Возвращает функцию y(x) и её производную dy/dx в мировой системе координат.
     function paddleArc() {
         const k = paddle.curvature;
         const baseY = paddle.y + paddle.h / 2;
-        // Максимальная высота дуги — до 18% ширины платформы
-        const arcHeight = k * paddle.w * 0.35;
-        // t: 0..1 вдоль платформы
+        const arcHeight = k * paddle.w * 0.5;
         const cx = paddle.x + paddle.w / 2;
         const halfW = paddle.w / 2;
         return {
-            // Смещение вверх от центра
             heightAt(worldX) {
                 if (halfW <= 0) return 0;
-                const t = (worldX - cx) / halfW;  // -1..1
-                // Парабола: -t^2 → максимум в центре (t=0)
-                // Нам нужна выпуклая вверх дуга: y = baseY - arcHeight*(1 - t^2)
+                const t = (worldX - cx) / halfW;
                 return arcHeight * (1 - t * t);
             },
-            // Производная (наклон касательной) в мировой точке
             slopeAt(worldX) {
                 if (halfW <= 0) return 0;
                 const t = (worldX - cx) / halfW;
-                // d/dx [ arcHeight * (1 - t^2) ] , t = (x-cx)/halfW
-                // = arcHeight * (-2t) * (1/halfW)
                 return arcHeight * 2 * t / halfW;
             },
             baseY
@@ -377,8 +409,8 @@
         return POWERUP_TYPES[0];
     }
 
-    function maybeSpawnPowerup(x, y) {
-        if (Math.random() > 0.15) return;
+    function maybeSpawnPowerup(x, y, forced = false) {
+        if (!forced && Math.random() > 0.15) return;
         const t = pickPowerupType();
         powerups.push({
             x: x - 11, y: y - 11,
@@ -406,6 +438,9 @@
                 break;
             case 'doubleScore':
                 activeBuffs.doubleScore = 15;
+                break;
+            case 'shield':
+                activeBuffs.shield = 8;
                 break;
             case 'multiBall': {
                 const src = balls[0];
@@ -442,7 +477,7 @@
         }
     }
 
-    // ===== Управление пальцем =====
+    // ===== Управление =====
     canvas.addEventListener('pointerdown', (e) => {
         resumeAudio();
         if (state !== 'playing' && state !== 'paused') return;
@@ -492,10 +527,7 @@
             e.stopPropagation();
             soundEnabled = !soundEnabled;
             soundBtn.textContent = soundEnabled ? '🔊' : '🔇';
-            if (soundEnabled) {
-                resumeAudio();
-                SFX.paddle();
-            }
+            if (soundEnabled) { resumeAudio(); SFX.paddle(); }
         });
     }
 
@@ -506,7 +538,7 @@
 
         // Таймеры бонусов
         let buffsChanged = false;
-        for (const key of ['widen', 'slow', 'doubleScore']) {
+        for (const key of ['widen', 'slow', 'doubleScore', 'shield']) {
             if (activeBuffs[key] > 0) {
                 activeBuffs[key] -= dt;
                 if (activeBuffs[key] <= 0) {
@@ -522,17 +554,15 @@
             }
         }
 
-        // Клавиатура
         const keySpeed = W * 0.9;
         if (keys['ArrowLeft'] || keys['a'] || keys['A']) paddle.targetX -= keySpeed * dt;
         if (keys['ArrowRight'] || keys['d'] || keys['D']) paddle.targetX += keySpeed * dt;
         paddle.targetX = Math.max(0, Math.min(W - paddle.w, paddle.targetX));
         paddle.x = paddle.targetX;
 
-        // Обновляем целевую кривизну на основе оставшихся кирпичей
+        // Кривизна
         paddle.targetCurvature = computeTargetCurvature();
-        // Плавная интерполяция
-        const bendSpeed = 1.2; // скорость изгиба
+        const bendSpeed = 1.2;
         const prevCurv = paddle.curvature;
         if (paddle.curvature < paddle.targetCurvature) {
             paddle.curvature = Math.min(paddle.targetCurvature, paddle.curvature + dt * bendSpeed);
@@ -540,7 +570,6 @@
             paddle.curvature = Math.max(paddle.targetCurvature, paddle.curvature - dt * bendSpeed);
         }
 
-        // Звук при заметном изгибе (не чаще раза в 1.5 сек)
         if (Math.abs(paddle.curvature - prevCurv) > 0.005 && time - lastBendSoundTime > 1.5) {
             SFX.bend();
             lastBendSoundTime = time;
@@ -558,6 +587,74 @@
 
         if (paddle.hitFlash > 0) paddle.hitFlash = Math.max(0, paddle.hitFlash - dt * 4);
 
+        // ===== Враги стреляют =====
+        for (const b of bricks) {
+            if (!b.alive || !b.isEnemy || b.spawnAnim < 1) continue;
+            b.pulse += dt * 4;
+
+            if (!hasClearPathToBottom(b)) continue;
+
+            b.fireCooldown -= dt;
+            if (b.fireCooldown <= 0) {
+                b.fireCooldown = b.fireInterval;
+                // Снаряд летит из центра кирпича
+                bullets.push({
+                    x: b.x + b.w / 2,
+                    y: b.y + b.h,
+                    vy: H * 0.55,       // скорость вниз
+                    vx: 0,
+                    r: 5,
+                    life: 4,
+                    wobble: Math.random() * Math.PI * 2
+                });
+                SFX.shoot();
+            }
+        }
+
+        // ===== Движение снарядов =====
+        for (let i = bullets.length - 1; i >= 0; i--) {
+            const bl = bullets[i];
+            bl.y += bl.vy * dt;
+            bl.x += bl.vx * dt;
+            bl.life -= dt;
+            bl.wobble += dt * 8;
+
+            if (bl.life <= 0 || bl.y > H + 20) {
+                bullets.splice(i, 1);
+                continue;
+            }
+
+            // Проверяем попадание в платформу (с учётом щита)
+            const shieldActive = activeBuffs.shield > 0;
+            const shieldRadius = 26;
+
+            // Попадание в щит
+            if (shieldActive) {
+                const cx = paddle.x + paddle.w / 2;
+                const cy = paddle.y + paddle.h / 2 - 6;
+                const dist = Math.hypot(bl.x - cx, bl.y - cy);
+                if (dist < paddle.w / 2 + shieldRadius) {
+                    // Погашен щитом
+                    spawnParticles(bl.x, bl.y, '#29b6f6', 12);
+                    SFX.hitShield();
+                    bullets.splice(i, 1);
+                    continue;
+                }
+            }
+
+            // Попадание в платформу
+            if (bl.x + bl.r >= paddle.x &&
+                bl.x - bl.r <= paddle.x + paddle.w &&
+                bl.y + bl.r >= paddle.y &&
+                bl.y - bl.r <= paddle.y + paddle.h) {
+                bullets.splice(i, 1);
+                spawnParticles(bl.x, bl.y, '#ff1744', 14);
+                loseLife();
+                return;
+            }
+        }
+
+        // ===== Движение мячей =====
         const speedMul = activeBuffs.slow > 0 ? 0.75 : 1.0;
         const steps = 3;
         const subDt = (dt / steps) * speedMul;
@@ -578,14 +675,11 @@
                 ball.x += ball.dx * subDt;
                 ball.y += ball.dy * subDt;
 
-                // Стены
                 if (ball.x - ball.r < 0) { ball.x = ball.r; ball.dx = Math.abs(ball.dx); SFX.wall(); }
                 if (ball.x + ball.r > W) { ball.x = W - ball.r; ball.dx = -Math.abs(ball.dx); SFX.wall(); }
                 if (ball.y - ball.r < 0) { ball.y = ball.r; ball.dy = Math.abs(ball.dy); SFX.wall(); }
 
-                // === Платформа-дуга ===
-                // Проверяем коллизию: если мяч летит вниз и его x в пределах платформы,
-                // а y находится между верхом дуги и низом платформы.
+                // Платформа
                 if (ball.dy > 0 &&
                     ball.x + ball.r >= paddle.x &&
                     ball.x - ball.r <= paddle.x + paddle.w) {
@@ -596,24 +690,17 @@
                     if (ball.y + ball.r >= arcTop &&
                         ball.y - ball.r <= paddleBottom) {
 
-                        // Ставим мяч на верх дуги
                         ball.y = arcTop - ball.r;
-
-                        // Наклон касательной к дуге в этой точке
-                        const slope = arc.slopeAt(ball.x); // dy/dx
-                        // Нормаль к кривой: (-slope, 1) нормализованная, направлена вверх
+                        const slope = arc.slopeAt(ball.x);
                         const nLen = Math.hypot(-slope, 1);
                         const nx = -slope / nLen;
                         const ny = 1 / nLen;
 
-                        // Отражаем вектор скорости относительно нормали
                         const dot = ball.dx * nx + ball.dy * ny;
                         ball.dx = ball.dx - 2 * dot * nx;
                         ball.dy = ball.dy - 2 * dot * ny;
 
-                        // Небольшой доворот от центра платформы (как раньше — влияет "хит")
                         const hitPos = (ball.x - (paddle.x + paddle.w / 2)) / (paddle.w / 2);
-                        // Дополнительный доворот скорости — не больше 15%
                         const extraAngle = hitPos * 0.25;
                         const cos = Math.cos(extraAngle);
                         const sin = Math.sin(extraAngle);
@@ -622,13 +709,11 @@
                         ball.dx = ndx;
                         ball.dy = ndy;
 
-                        // Ускорение
                         const speed = Math.hypot(ball.dx, ball.dy) * 1.02;
                         const ang = Math.atan2(ball.dy, ball.dx);
                         ball.dx = Math.cos(ang) * speed;
                         ball.dy = Math.sin(ang) * speed;
 
-                        // Гарантируем, что мяч отскочил вверх
                         if (ball.dy > 0) ball.dy = -ball.dy;
 
                         paddle.hitFlash = 1;
@@ -654,19 +739,33 @@
                         ball.dy = -ball.dy;
                     }
 
-                    b.hp--;
-                    if (b.hp <= 0) {
+                    if (b.isEnemy) {
+                        // Враг разбивается с одного удара
                         b.alive = false;
                         aliveBricksCount--;
                         const mult = activeBuffs.doubleScore > 0 ? 2 : 1;
-                        score += 10 * mult * b.maxHp;
+                        score += 50 * mult;
                         updateHUD();
-                        spawnParticles(b.x + b.w / 2, b.y + b.h / 2, b.color, 10 + b.maxHp * 3);
-                        maybeSpawnPowerup(b.x + b.w / 2, b.y + b.h / 2);
-                        SFX.brick();
+                        spawnParticles(b.x + b.w / 2, b.y + b.h / 2, '#ff1744', 20);
+                        spawnParticles(b.x + b.w / 2, b.y + b.h / 2, '#ffeb3b', 10);
+                        // Враг всегда роняет бонус
+                        maybeSpawnPowerup(b.x + b.w / 2, b.y + b.h / 2, true);
+                        SFX.enemyBreak();
                     } else {
-                        spawnParticles(ball.x, ball.y, b.color, 4);
-                        SFX.brickHard();
+                        b.hp--;
+                        if (b.hp <= 0) {
+                            b.alive = false;
+                            aliveBricksCount--;
+                            const mult = activeBuffs.doubleScore > 0 ? 2 : 1;
+                            score += 10 * mult * b.maxHp;
+                            updateHUD();
+                            spawnParticles(b.x + b.w / 2, b.y + b.h / 2, b.color, 10 + b.maxHp * 3);
+                            maybeSpawnPowerup(b.x + b.w / 2, b.y + b.h / 2);
+                            SFX.brick();
+                        } else {
+                            spawnParticles(ball.x, ball.y, b.color, 4);
+                            SFX.brickHard();
+                        }
                     }
                     break;
                 }
@@ -710,7 +809,6 @@
             pt.vy += 120 * dt;
         }
 
-        // Победа
         if (aliveBricksCount <= 0) {
             nextLevel();
         }
@@ -755,39 +853,83 @@
         ctx.scale(scale, scale);
         ctx.translate(-b.w / 2, -b.h / 2);
 
-        ctx.shadowColor = b.color;
-        ctx.shadowBlur = 12;
+        // Враг — рисуем особо
+        if (b.isEnemy) {
+            const pulse = 0.5 + 0.5 * Math.sin(b.pulse);
+            const ready = hasClearPathToBottom(b) && b.spawnAnim >= 1;
 
-        const g = ctx.createLinearGradient(0, 0, 0, b.h);
-        g.addColorStop(0, lighten(b.color, 0.25));
-        g.addColorStop(1, b.color);
-        ctx.fillStyle = g;
+            ctx.shadowColor = ready ? '#ff1744' : '#880e4f';
+            ctx.shadowBlur = 12 + pulse * 12;
+            const g = ctx.createLinearGradient(0, 0, 0, b.h);
+            g.addColorStop(0, '#ff5252');
+            g.addColorStop(1, '#880e4f');
+            ctx.fillStyle = g;
+            roundRect(0, 0, b.w, b.h, 4);
+            ctx.fill();
+            ctx.shadowBlur = 0;
 
-        roundRect(0, 0, b.w, b.h, 4);
-        ctx.fill();
-        ctx.shadowBlur = 0;
+            // Значок "глаз" или прицел
+            ctx.strokeStyle = ready ? '#fff' : 'rgba(255,255,255,0.4)';
+            ctx.lineWidth = 1.8;
+            ctx.beginPath();
+            ctx.arc(b.w / 2, b.h / 2, 5, 0, Math.PI * 2);
+            ctx.stroke();
+            ctx.fillStyle = ready ? '#fff' : 'rgba(255,255,255,0.4)';
+            ctx.beginPath();
+            ctx.arc(b.w / 2, b.h / 2, 2.5, 0, Math.PI * 2);
+            ctx.fill();
 
-        ctx.fillStyle = 'rgba(255,255,255,0.25)';
-        roundRect(2, 2, b.w - 4, 3, 2);
-        ctx.fill();
-
-        if (b.maxHp > 1) {
-            ctx.strokeStyle = 'rgba(0,0,0,0.4)';
-            ctx.lineWidth = 1.5;
-            const dmg = b.maxHp - b.hp;
-            for (let i = 0; i < dmg; i++) {
+            // Пульсирующее кольцо
+            if (ready) {
+                ctx.strokeStyle = `rgba(255, 23, 68, ${0.3 + pulse * 0.4})`;
+                ctx.lineWidth = 1.5;
                 ctx.beginPath();
-                const cx = b.w * (0.25 + i * 0.25);
-                ctx.moveTo(cx, b.h * 0.2);
-                ctx.lineTo(cx + 4, b.h * 0.5);
-                ctx.lineTo(cx - 2, b.h * 0.8);
+                ctx.arc(b.w / 2, b.h / 2, 5 + pulse * 4, 0, Math.PI * 2);
                 ctx.stroke();
             }
-            ctx.fillStyle = 'rgba(255,255,255,0.85)';
-            ctx.font = 'bold 10px sans-serif';
-            ctx.textAlign = 'center';
-            ctx.textBaseline = 'middle';
-            ctx.fillText(b.hp, b.w / 2, b.h / 2 + 1);
+
+            // Индикатор перезарядки — тонкая полоска снизу
+            if (ready) {
+                const total = b.fireInterval;
+                const left = Math.max(0, b.fireCooldown);
+                const ratio = 1 - left / total;
+                ctx.fillStyle = 'rgba(255,255,255,0.6)';
+                ctx.fillRect(2, b.h - 3, (b.w - 4) * ratio, 2);
+            }
+        } else {
+            // Обычный кирпич (старая логика)
+            ctx.shadowColor = b.color;
+            ctx.shadowBlur = 12;
+            const g = ctx.createLinearGradient(0, 0, 0, b.h);
+            g.addColorStop(0, lighten(b.color, 0.25));
+            g.addColorStop(1, b.color);
+            ctx.fillStyle = g;
+            roundRect(0, 0, b.w, b.h, 4);
+            ctx.fill();
+            ctx.shadowBlur = 0;
+
+            ctx.fillStyle = 'rgba(255,255,255,0.25)';
+            roundRect(2, 2, b.w - 4, 3, 2);
+            ctx.fill();
+
+            if (b.maxHp > 1) {
+                ctx.strokeStyle = 'rgba(0,0,0,0.4)';
+                ctx.lineWidth = 1.5;
+                const dmg = b.maxHp - b.hp;
+                for (let i = 0; i < dmg; i++) {
+                    ctx.beginPath();
+                    const cx = b.w * (0.25 + i * 0.25);
+                    ctx.moveTo(cx, b.h * 0.2);
+                    ctx.lineTo(cx + 4, b.h * 0.5);
+                    ctx.lineTo(cx - 2, b.h * 0.8);
+                    ctx.stroke();
+                }
+                ctx.fillStyle = 'rgba(255,255,255,0.85)';
+                ctx.font = 'bold 10px sans-serif';
+                ctx.textAlign = 'center';
+                ctx.textBaseline = 'middle';
+                ctx.fillText(b.hp, b.w / 2, b.h / 2 + 1);
+            }
         }
 
         ctx.restore();
@@ -828,7 +970,6 @@
         ctx.shadowBlur = 15 + flash * 25;
 
         if (k < 0.02) {
-            // Плоская платформа — как раньше
             const g = ctx.createLinearGradient(paddle.x, 0, paddle.x + paddle.w, 0);
             g.addColorStop(0, '#4dd0e1');
             g.addColorStop(1, '#9c27b0');
@@ -840,64 +981,139 @@
             ctx.fillStyle = 'rgba(255,255,255,' + (0.3 + flash * 0.5) + ')';
             roundRect(paddle.x + 4, paddle.y + 2, paddle.w - 8, 3, 2);
             ctx.fill();
-            return;
+        } else {
+            const arc = paddleArc();
+            const baseY = paddle.y + paddle.h;
+            const thickness = paddle.h;
+            const N = 24;
+            const pts = [];
+            const cx = paddle.x + paddle.w / 2;
+            const halfW = paddle.w / 2;
+
+            for (let i = 0; i <= N; i++) {
+                const x = paddle.x + (paddle.w * i / N);
+                const t = (x - cx) / halfW;
+                const up = k * paddle.w * 0.5 * (1 - t * t);
+                pts.push({ x, y: baseY - up - thickness });
+            }
+            for (let i = N; i >= 0; i--) {
+                const x = paddle.x + (paddle.w * i / N);
+                const t = (x - cx) / halfW;
+                const up = k * paddle.w * 0.5 * (1 - t * t);
+                pts.push({ x, y: baseY - up });
+            }
+
+            const g = ctx.createLinearGradient(paddle.x, 0, paddle.x + paddle.w, 0);
+            g.addColorStop(0, '#4dd0e1');
+            g.addColorStop(1, '#9c27b0');
+            ctx.fillStyle = g;
+
+            ctx.beginPath();
+            ctx.moveTo(pts[0].x, pts[0].y);
+            for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i].x, pts[i].y);
+            ctx.closePath();
+            ctx.fill();
+            ctx.shadowBlur = 0;
+
+            ctx.strokeStyle = 'rgba(255,255,255,' + (0.4 + flash * 0.5) + ')';
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+            for (let i = 0; i <= N; i++) {
+                const x = paddle.x + (paddle.w * i / N);
+                const t = (x - cx) / halfW;
+                const up = k * paddle.w * 0.5 * (1 - t * t);
+                const y = baseY - up - thickness + 2;
+                if (i === 0) ctx.moveTo(x, y);
+                else ctx.lineTo(x, y);
+            }
+            ctx.stroke();
         }
 
-        // === Дуга ===
-        const arc = paddleArc();
-        const baseY = paddle.y + paddle.h;   // низ дуги — там, где "основание"
-        const thickness = paddle.h;
+        // ===== Щит =====
+        if (activeBuffs.shield > 0) {
+            drawShield();
+        }
+    }
 
-        // Нарисуем платформу как заполненную область между двумя параболами:
-        // верхняя: baseY - arcHeight*(1 - t^2)
-        // нижняя: baseY - arcHeight*(1 - t^2) + thickness
-        // Используем путь по точкам.
-
-        const N = 24;
-        const pts = [];
+    function drawShield() {
         const cx = paddle.x + paddle.w / 2;
-        const halfW = paddle.w / 2;
+        const cy = paddle.y + paddle.h / 2 - 6;
+        const baseR = paddle.w / 2 + 26;
+        const pulse = 0.5 + 0.5 * Math.sin(time * 22);
+        const lowTime = activeBuffs.shield < 2;
+        const alpha = lowTime ? (0.3 + 0.5 * pulse) : (0.55 + 0.25 * pulse);
 
-        // Верхняя кромка слева направо
-        for (let i = 0; i <= N; i++) {
-            const x = paddle.x + (paddle.w * i / N);
-            const t = (x - cx) / halfW;
-            const up = k * paddle.w * 0.35 * (1 - t * t);
-            pts.push({ x, y: baseY - up - thickness });
-        }
-        // Нижняя кромка справа налево
-        for (let i = N; i >= 0; i--) {
-            const x = paddle.x + (paddle.w * i / N);
-            const t = (x - cx) / halfW;
-            const up = k * paddle.w * 0.35 * (1 - t * t);
-            pts.push({ x, y: baseY - up });
-        }
-
-        // Градиент по ширине
-        const g = ctx.createLinearGradient(paddle.x, 0, paddle.x + paddle.w, 0);
-        g.addColorStop(0, '#4dd0e1');
-        g.addColorStop(1, '#9c27b0');
+        // Полупрозрачный купол
+        const g = ctx.createRadialGradient(cx, cy, baseR * 0.5, cx, cy, baseR);
+        g.addColorStop(0, 'rgba(41, 182, 246, 0)');
+        g.addColorStop(0.7, `rgba(41, 182, 246, ${alpha * 0.35})`);
+        g.addColorStop(1, `rgba(41, 182, 246, ${alpha * 0.7})`);
         ctx.fillStyle = g;
-
         ctx.beginPath();
-        ctx.moveTo(pts[0].x, pts[0].y);
-        for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i].x, pts[i].y);
-        ctx.closePath();
+        ctx.arc(cx, cy, baseR, 0, Math.PI * 2);
         ctx.fill();
-        ctx.shadowBlur = 0;
 
-        // Верхний блик — тонкая линия по верхней кромке
-        ctx.strokeStyle = 'rgba(255,255,255,' + (0.4 + flash * 0.5) + ')';
+        // Электрические дуги (зигзаги) — 5 штук, каждый со своим смещением по времени
+        const arcs = 5;
+        for (let a = 0; a < arcs; a++) {
+            const baseAngle = (a / arcs) * Math.PI * 2 + time * 1.5;
+            // Слегка дрожит
+            const angle = baseAngle + Math.sin(time * 13 + a * 2.1) * 0.15;
+            const startR = baseR * (0.75 + 0.15 * Math.sin(time * 5 + a));
+            const endR = baseR * (0.95 + 0.05 * Math.sin(time * 7 + a * 1.3));
+
+            const x1 = cx + Math.cos(angle) * startR;
+            const y1 = cy + Math.sin(angle) * startR;
+            const x2 = cx + Math.cos(angle + 0.2) * endR;
+            const y2 = cy + Math.sin(angle + 0.2) * endR;
+
+            ctx.strokeStyle = `rgba(120, 220, 255, ${alpha})`;
+            ctx.lineWidth = 1.5 + pulse * 1.5;
+            ctx.beginPath();
+            ctx.moveTo(x1, y1);
+            // Зигзаг из 3 сегментов
+            const mx = (x1 + x2) / 2 + (Math.random() - 0.5) * 10;
+            const my = (y1 + y2) / 2 + (Math.random() - 0.5) * 10;
+            ctx.lineTo(mx + (Math.random() - 0.5) * 6, my + (Math.random() - 0.5) * 6);
+            ctx.lineTo(x2, y2);
+            ctx.stroke();
+        }
+
+        // Внешнее пульсирующее кольцо
+        ctx.strokeStyle = `rgba(41, 182, 246, ${alpha * 0.8})`;
         ctx.lineWidth = 2;
         ctx.beginPath();
-        for (let i = 0; i <= N; i++) {
-            const x = paddle.x + (paddle.w * i / N);
-            const t = (x - cx) / halfW;
-            const up = k * paddle.w * 0.35 * (1 - t * t);
-            const y = baseY - up - thickness + 2;
-            if (i === 0) ctx.moveTo(x, y);
-            else ctx.lineTo(x, y);
-        }
+        ctx.arc(cx, cy, baseR, 0, Math.PI * 2);
+        ctx.stroke();
+    }
+
+    function drawBullet(bl) {
+        const wob = Math.sin(bl.wobble) * 1.5;
+        // Свечение
+        const g = ctx.createRadialGradient(bl.x, bl.y, 0, bl.x, bl.y, bl.r * 3);
+        g.addColorStop(0, 'rgba(255, 100, 100, 1)');
+        g.addColorStop(0.5, 'rgba(255, 23, 68, 0.6)');
+        g.addColorStop(1, 'rgba(255, 23, 68, 0)');
+        ctx.fillStyle = g;
+        ctx.beginPath();
+        ctx.arc(bl.x, bl.y, bl.r * 3, 0, Math.PI * 2);
+        ctx.fill();
+
+        // Ядро
+        ctx.fillStyle = '#fff';
+        ctx.shadowColor = '#ff1744';
+        ctx.shadowBlur = 12;
+        ctx.beginPath();
+        ctx.arc(bl.x + wob, bl.y, bl.r, 0, Math.PI * 2);
+        ctx.fill();
+
+        // Хвостик сверху
+        ctx.shadowBlur = 0;
+        ctx.strokeStyle = 'rgba(255, 100, 100, 0.7)';
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.moveTo(bl.x, bl.y - bl.r - 2);
+        ctx.lineTo(bl.x, bl.y - bl.r - 10);
         ctx.stroke();
     }
 
@@ -932,6 +1148,10 @@
         drawBackground();
         for (const b of bricks) if (b.alive) drawBrick(b);
         for (const p of powerups) drawPowerup(p);
+
+        // Снаряды — под платформой, чтобы щит их "перекрывал"
+        for (const bl of bullets) drawBullet(bl);
+
         drawPaddle();
         for (const ball of balls) drawBall(ball);
 
