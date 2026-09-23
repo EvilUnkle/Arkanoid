@@ -14,6 +14,10 @@
     const pauseBtn = document.getElementById('pause-btn');
     const soundBtn = document.getElementById('sound-btn');
 
+    // ⚠️ ТЕСТ: старт сразу со 2 уровня, чтобы увидеть врагов
+    // Когда закончишь тестировать — поменяй на 1
+    const START_LEVEL = 2;
+
     let W = 0, H = 0, DPR = 1;
 
     const paddle = {
@@ -24,7 +28,7 @@
     const bricks = [];
     const particles = [];
     const powerups = [];
-    const bullets = [];   // вражеские снаряды
+    const bullets = [];
 
     const BRICK_COLS = 8;
     const BRICK_ROWS = 5;
@@ -160,6 +164,14 @@
         });
     }
 
+    // Безопасный подсчёт нужного числа врагов (без while-циклов)
+    function enemiesForLevel(lvl) {
+        if (lvl <= 1) return 0;
+        if (lvl === 2) return 2;
+        if (lvl === 3) return 3;
+        return Math.min(3 + Math.floor((lvl - 3) / 2), 6);
+    }
+
     function createBricks() {
         bricks.length = 0;
         bullets.length = 0;
@@ -174,62 +186,57 @@
         const density = Math.min(0.7 + (level - 1) * 0.05, 0.95);
         const hardChance = Math.min(0.05 + (level - 1) * 0.08, 0.4);
 
-        // ===== Сколько врагов гарантированно должно быть =====
-        // Уровень 1 — 0, уровень 2 — 2, уровень 3 — 3, дальше растёт
-        let enemiesToPlace = 0;
-        if (level === 2) enemiesToPlace = 2;
-        else if (level === 3) enemiesToPlace = 3;
-        else if (level >= 4) enemiesToPlace = Math.min(3 + Math.floor((level - 3) / 2), 6);
+        // === 1) Готовим список врагов (строки-колонки) ===
+        const enemiesToPlace = enemiesForLevel(level);
+        const enemyRowLimit = Math.max(1, rows - 2); // только верхние ряды
 
-        // Врагов можно ставить только в ряды, где ниже есть минимум 2 ряда
-        // (чтобы колонка для выстрела была)
-        const enemyRowLimit = rows - 2;
-
-        // Собираем все подходящие позиции (row < enemyRowLimit)
-        const candidatePositions = [];
+        // Собираем все кандидатные позиции (row < enemyRowLimit)
+        const candidates = [];
         for (let row = 0; row < enemyRowLimit; row++) {
             for (let col = 0; col < BRICK_COLS; col++) {
-                candidatePositions.push({ row, col });
+                candidates.push({ row, col });
             }
         }
-        // Перемешиваем Фишером-Йетсом
-        for (let i = candidatePositions.length - 1; i > 0; i--) {
+
+        // Простая перетасовка (Fisher-Yates)
+        for (let i = candidates.length - 1; i > 0; i--) {
             const j = Math.floor(Math.random() * (i + 1));
-            [candidatePositions[i], candidatePositions[j]] = [candidatePositions[j], candidatePositions[i]];
+            const tmp = candidates[i];
+            candidates[i] = candidates[j];
+            candidates[j] = tmp;
         }
 
-        // Отмечаем позиции врагов (row-col)
-        const enemyPositions = new Set();
-        // Стараемся не ставить двух врагов в одну колонку — иначе проигрыш слишком лёгкий
+        // Отбираем врагов: сначала в разные колонки, потом — любые оставшиеся
+        const enemySet = new Set();
         const usedCols = new Set();
-        for (const pos of candidatePositions) {
-            if (enemyPositions.size >= enemiesToPlace) break;
-            if (usedCols.has(pos.col)) continue;
-            enemyPositions.add(`${pos.row}-${pos.col}`);
-            usedCols.add(pos.col);
+        for (let i = 0; i < candidates.length && enemySet.size < enemiesToPlace; i++) {
+            const p = candidates[i];
+            if (usedCols.has(p.col)) continue;
+            enemySet.add(p.row + '-' + p.col);
+            usedCols.add(p.col);
         }
-        // Если после фильтра по колонкам не хватило — добираем любые
-        if (enemyPositions.size < enemiesToPlace) {
-            for (const pos of candidatePositions) {
-                if (enemyPositions.size >= enemiesToPlace) break;
-                enemyPositions.add(`${pos.row}-${pos.col}`);
-            }
+        for (let i = 0; i < candidates.length && enemySet.size < enemiesToPlace; i++) {
+            const p = candidates[i];
+            enemySet.add(p.row + '-' + p.col);
         }
 
-        // Основной проход
+        // === 2) Основной проход по сетке ===
         for (let row = 0; row < rows; row++) {
             for (let col = 0; col < BRICK_COLS; col++) {
-                // Плотность отсеивает колонки, но врагов ставим принудительно
-                const isForcedEnemy = enemyPositions.has(`${row}-${col}`);
-                if (!isForcedEnemy && Math.random() > density) continue;
+                const key = row + '-' + col;
+                const forcedEnemy = enemySet.has(key);
 
-                if (isForcedEnemy) {
+                // Если это не форсированный враг — может быть отсеян по плотности
+                if (!forcedEnemy && Math.random() > density) continue;
+
+                const baseX = padding + col * (brickW + padding);
+                const baseY = 20 + row * (brickH + padding);
+
+                if (forcedEnemy) {
                     bricks.push({
                         col, row,
-                        x: padding + col * (brickW + padding),
-                        y: 20 + row * (brickH + padding),
-                        w: brickW,
-                        h: brickH,
+                        x: baseX, y: baseY,
+                        w: brickW, h: brickH,
                         alive: true,
                         hp: 1, maxHp: 1,
                         color: '#ff1744',
@@ -248,10 +255,8 @@
 
                 bricks.push({
                     col, row,
-                    x: padding + col * (brickW + padding),
-                    y: 20 + row * (brickH + padding),
-                    w: brickW,
-                    h: brickH,
+                    x: baseX, y: baseY,
+                    w: brickW, h: brickH,
                     alive: true,
                     hp, maxHp: hp,
                     color: BRICK_COLORS[row % BRICK_COLORS.length],
@@ -262,25 +267,24 @@
             }
         }
 
-        // Страховка от слишком пустого поля
+        // === 3) Страховка: если поле совсем пустое, добавляем ряд сверху ===
+        // (проверка без вложенных "пока не наберём 8" — просто разовая)
         if (bricks.length < 8) {
-            for (let row = 0; row < 3 && bricks.length < 8; row++) {
-                for (let col = 0; col < BRICK_COLS && bricks.length < 8; col++) {
-                    if (bricks.some(b => b.row === row && b.col === col)) continue;
-                    bricks.push({
-                        col, row,
-                        x: padding + col * (brickW + padding),
-                        y: 20 + row * (brickH + padding),
-                        w: brickW,
-                        h: brickH,
-                        alive: true,
-                        hp: 1, maxHp: 1,
-                        color: BRICK_COLORS[row % BRICK_COLORS.length],
-                        isEnemy: false,
-                        spawnAnim: 0,
-                        spawnDelay: 0
-                    });
-                }
+            for (let col = 0; col < BRICK_COLS; col++) {
+                const key = '0-' + col;
+                if (bricks.some(b => b.row === 0 && b.col === col)) continue;
+                bricks.push({
+                    col, row: 0,
+                    x: padding + col * (brickW + padding),
+                    y: 20,
+                    w: brickW, h: brickH,
+                    alive: true,
+                    hp: 1, maxHp: 1,
+                    color: BRICK_COLORS[0],
+                    isEnemy: false,
+                    spawnAnim: 0,
+                    spawnDelay: 0
+                });
             }
         }
 
@@ -288,6 +292,15 @@
         aliveBricksCount = bricks.length;
         paddle.curvature = 0;
         paddle.targetCurvature = 0;
+    }
+
+    function hasClearPathToBottom(brick) {
+        for (let i = 0; i < bricks.length; i++) {
+            const other = bricks[i];
+            if (!other.alive) continue;
+            if (other.col === brick.col && other.row > brick.row) return false;
+        }
+        return true;
     }
 
     function createBall(x, y) {
@@ -311,7 +324,7 @@
         resumeAudio();
         score = 0;
         lives = 3;
-        level = 2;
+        level = START_LEVEL;
         activeBuffs.widen = 0;
         activeBuffs.slow = 0;
         activeBuffs.doubleScore = 0;
@@ -361,7 +374,7 @@
         updateHUD();
         if (lives <= 0) {
             state = 'gameover';
-            showOverlay('Игра окончена', `Твой счёт: ${score}`, 'Заново');
+            showOverlay('Игра окончена', 'Твой счёт: ' + score, 'Заново');
         } else {
             activeBuffs.widen = 0;
             activeBuffs.slow = 0;
@@ -392,11 +405,11 @@
     function updateBuffsUI() {
         if (!buffsEl) return;
         const parts = [];
-        if (activeBuffs.widen > 0) parts.push(`+${Math.ceil(activeBuffs.widen)}с`);
-        if (activeBuffs.slow > 0) parts.push(`S ${Math.ceil(activeBuffs.slow)}с`);
-        if (activeBuffs.doubleScore > 0) parts.push(`×2 ${Math.ceil(activeBuffs.doubleScore)}с`);
-        if (activeBuffs.shield > 0) parts.push(`⚡ ${Math.ceil(activeBuffs.shield)}с`);
-        if (paddle.curvature > 0.05) parts.push(`⌒ ${Math.round(paddle.curvature * 100)}%`);
+        if (activeBuffs.widen > 0) parts.push('+' + Math.ceil(activeBuffs.widen) + 'с');
+        if (activeBuffs.slow > 0) parts.push('S ' + Math.ceil(activeBuffs.slow) + 'с');
+        if (activeBuffs.doubleScore > 0) parts.push('×2 ' + Math.ceil(activeBuffs.doubleScore) + 'с');
+        if (activeBuffs.shield > 0) parts.push('⚡ ' + Math.ceil(activeBuffs.shield) + 'с');
+        if (paddle.curvature > 0.05) parts.push('⌒ ' + Math.round(paddle.curvature * 100) + '%');
         buffsEl.textContent = parts.join('  ');
     }
 
@@ -439,7 +452,7 @@
         return POWERUP_TYPES[0];
     }
 
-    function maybeSpawnPowerup(x, y, forced = false) {
+    function maybeSpawnPowerup(x, y, forced) {
         if (!forced && Math.random() > 0.15) return;
         const t = pickPowerupType();
         powerups.push({
@@ -608,7 +621,8 @@
         if (buffsChanged || paddle.curvature > 0.05) updateBuffsUI();
 
         // Анимация появления кирпичей
-        for (const b of bricks) {
+        for (let i = 0; i < bricks.length; i++) {
+            const b = bricks[i];
             if (b.spawnAnim < 1) {
                 b.spawnDelay -= dt;
                 if (b.spawnDelay <= 0) b.spawnAnim = Math.min(1, b.spawnAnim + dt * 4);
@@ -618,7 +632,8 @@
         if (paddle.hitFlash > 0) paddle.hitFlash = Math.max(0, paddle.hitFlash - dt * 4);
 
         // ===== Враги стреляют =====
-        for (const b of bricks) {
+        for (let i = 0; i < bricks.length; i++) {
+            const b = bricks[i];
             if (!b.alive || !b.isEnemy || b.spawnAnim < 1) continue;
             b.pulse += dt * 4;
 
@@ -627,11 +642,10 @@
             b.fireCooldown -= dt;
             if (b.fireCooldown <= 0) {
                 b.fireCooldown = b.fireInterval;
-                // Снаряд летит из центра кирпича
                 bullets.push({
                     x: b.x + b.w / 2,
                     y: b.y + b.h,
-                    vy: H * 0.55,       // скорость вниз
+                    vy: H * 0.55,
                     vx: 0,
                     r: 5,
                     life: 4,
@@ -654,17 +668,14 @@
                 continue;
             }
 
-            // Проверяем попадание в платформу (с учётом щита)
             const shieldActive = activeBuffs.shield > 0;
             const shieldRadius = 26;
 
-            // Попадание в щит
             if (shieldActive) {
                 const cx = paddle.x + paddle.w / 2;
                 const cy = paddle.y + paddle.h / 2 - 6;
                 const dist = Math.hypot(bl.x - cx, bl.y - cy);
                 if (dist < paddle.w / 2 + shieldRadius) {
-                    // Погашен щитом
                     spawnParticles(bl.x, bl.y, '#29b6f6', 12);
                     SFX.hitShield();
                     bullets.splice(i, 1);
@@ -672,7 +683,6 @@
                 }
             }
 
-            // Попадание в платформу
             if (bl.x + bl.r >= paddle.x &&
                 bl.x - bl.r <= paddle.x + paddle.w &&
                 bl.y + bl.r >= paddle.y &&
@@ -752,7 +762,8 @@
                 }
 
                 // Кирпичи
-                for (const b of bricks) {
+                for (let k = 0; k < bricks.length; k++) {
+                    const b = bricks[k];
                     if (!b.alive) continue;
                     if (ball.x + ball.r < b.x || ball.x - ball.r > b.x + b.w ||
                         ball.y + ball.r < b.y || ball.y - ball.r > b.y + b.h) continue;
@@ -770,7 +781,6 @@
                     }
 
                     if (b.isEnemy) {
-                        // Враг разбивается с одного удара
                         b.alive = false;
                         aliveBricksCount--;
                         const mult = activeBuffs.doubleScore > 0 ? 2 : 1;
@@ -778,7 +788,6 @@
                         updateHUD();
                         spawnParticles(b.x + b.w / 2, b.y + b.h / 2, '#ff1744', 20);
                         spawnParticles(b.x + b.w / 2, b.y + b.h / 2, '#ffeb3b', 10);
-                        // Враг всегда роняет бонус
                         maybeSpawnPowerup(b.x + b.w / 2, b.y + b.h / 2, true);
                         SFX.enemyBreak();
                     } else {
@@ -790,7 +799,7 @@
                             score += 10 * mult * b.maxHp;
                             updateHUD();
                             spawnParticles(b.x + b.w / 2, b.y + b.h / 2, b.color, 10 + b.maxHp * 3);
-                            maybeSpawnPowerup(b.x + b.w / 2, b.y + b.h / 2);
+                            maybeSpawnPowerup(b.x + b.w / 2, b.y + b.h / 2, false);
                             SFX.brick();
                         } else {
                             spawnParticles(ball.x, ball.y, b.color, 4);
@@ -883,7 +892,6 @@
         ctx.scale(scale, scale);
         ctx.translate(-b.w / 2, -b.h / 2);
 
-        // Враг — рисуем особо
         if (b.isEnemy) {
             const pulse = 0.5 + 0.5 * Math.sin(b.pulse);
             const ready = hasClearPathToBottom(b) && b.spawnAnim >= 1;
@@ -898,7 +906,6 @@
             ctx.fill();
             ctx.shadowBlur = 0;
 
-            // Значок "глаз" или прицел
             ctx.strokeStyle = ready ? '#fff' : 'rgba(255,255,255,0.4)';
             ctx.lineWidth = 1.8;
             ctx.beginPath();
@@ -909,16 +916,14 @@
             ctx.arc(b.w / 2, b.h / 2, 2.5, 0, Math.PI * 2);
             ctx.fill();
 
-            // Пульсирующее кольцо
             if (ready) {
-                ctx.strokeStyle = `rgba(255, 23, 68, ${0.3 + pulse * 0.4})`;
+                ctx.strokeStyle = 'rgba(255, 23, 68, ' + (0.3 + pulse * 0.4) + ')';
                 ctx.lineWidth = 1.5;
                 ctx.beginPath();
                 ctx.arc(b.w / 2, b.h / 2, 5 + pulse * 4, 0, Math.PI * 2);
                 ctx.stroke();
             }
 
-            // Индикатор перезарядки — тонкая полоска снизу
             if (ready) {
                 const total = b.fireInterval;
                 const left = Math.max(0, b.fireCooldown);
@@ -927,7 +932,6 @@
                 ctx.fillRect(2, b.h - 3, (b.w - 4) * ratio, 2);
             }
         } else {
-            // Обычный кирпич (старая логика)
             ctx.shadowColor = b.color;
             ctx.shadowBlur = 12;
             const g = ctx.createLinearGradient(0, 0, 0, b.h);
@@ -1001,18 +1005,18 @@
 
         if (k < 0.02) {
             const g = ctx.createLinearGradient(paddle.x, 0, paddle.x + paddle.w, 0);
-            g.addColorStop(0, '#4dd0e1');
-            g.addColorStop(1, '#9c27b0');
-            ctx.fillStyle = g;
-            roundRect(paddle.x, paddle.y, paddle.w, paddle.h, paddle.h / 2);
+            g.addColorStop(0, else '#4dd0e1');
+            g.addColor {
+Stop(1,            '#9c27b0');
+            const ctx.fillStyle = g;
+            arc roundRect(paddle.x, paddle.y, paddle.w, paddle.h, paddle.h / 2);
             ctx.fill();
             ctx.shadowBlur = 0;
 
             ctx.fillStyle = 'rgba(255,255,255,' + (0.3 + flash * 0.5) + ')';
             roundRect(paddle.x + 4, paddle.y + 2, paddle.w - 8, 3, 2);
             ctx.fill();
-        } else {
-            const arc = paddleArc();
+        } = paddleArc();
             const baseY = paddle.y + paddle.h;
             const thickness = paddle.h;
             const N = 24;
@@ -1059,7 +1063,6 @@
             ctx.stroke();
         }
 
-        // ===== Щит =====
         if (activeBuffs.shield > 0) {
             drawShield();
         }
@@ -1073,21 +1076,18 @@
         const lowTime = activeBuffs.shield < 2;
         const alpha = lowTime ? (0.3 + 0.5 * pulse) : (0.55 + 0.25 * pulse);
 
-        // Полупрозрачный купол
         const g = ctx.createRadialGradient(cx, cy, baseR * 0.5, cx, cy, baseR);
         g.addColorStop(0, 'rgba(41, 182, 246, 0)');
-        g.addColorStop(0.7, `rgba(41, 182, 246, ${alpha * 0.35})`);
-        g.addColorStop(1, `rgba(41, 182, 246, ${alpha * 0.7})`);
+        g.addColorStop(0.7, 'rgba(41, 182, 246, ' + (alpha * 0.35) + ')');
+        g.addColorStop(1, 'rgba(41, 182, 246, ' + (alpha * 0.7) + ')');
         ctx.fillStyle = g;
         ctx.beginPath();
         ctx.arc(cx, cy, baseR, 0, Math.PI * 2);
         ctx.fill();
 
-        // Электрические дуги (зигзаги) — 5 штук, каждый со своим смещением по времени
         const arcs = 5;
         for (let a = 0; a < arcs; a++) {
             const baseAngle = (a / arcs) * Math.PI * 2 + time * 1.5;
-            // Слегка дрожит
             const angle = baseAngle + Math.sin(time * 13 + a * 2.1) * 0.15;
             const startR = baseR * (0.75 + 0.15 * Math.sin(time * 5 + a));
             const endR = baseR * (0.95 + 0.05 * Math.sin(time * 7 + a * 1.3));
@@ -1097,11 +1097,10 @@
             const x2 = cx + Math.cos(angle + 0.2) * endR;
             const y2 = cy + Math.sin(angle + 0.2) * endR;
 
-            ctx.strokeStyle = `rgba(120, 220, 255, ${alpha})`;
+            ctx.strokeStyle = 'rgba(120, 220, 255, ' + alpha + ')';
             ctx.lineWidth = 1.5 + pulse * 1.5;
             ctx.beginPath();
             ctx.moveTo(x1, y1);
-            // Зигзаг из 3 сегментов
             const mx = (x1 + x2) / 2 + (Math.random() - 0.5) * 10;
             const my = (y1 + y2) / 2 + (Math.random() - 0.5) * 10;
             ctx.lineTo(mx + (Math.random() - 0.5) * 6, my + (Math.random() - 0.5) * 6);
@@ -1109,8 +1108,7 @@
             ctx.stroke();
         }
 
-        // Внешнее пульсирующее кольцо
-        ctx.strokeStyle = `rgba(41, 182, 246, ${alpha * 0.8})`;
+        ctx.strokeStyle = 'rgba(41, 182, 246, ' + (alpha * 0.8) + ')';
         ctx.lineWidth = 2;
         ctx.beginPath();
         ctx.arc(cx, cy, baseR, 0, Math.PI * 2);
@@ -1119,7 +1117,6 @@
 
     function drawBullet(bl) {
         const wob = Math.sin(bl.wobble) * 1.5;
-        // Свечение
         const g = ctx.createRadialGradient(bl.x, bl.y, 0, bl.x, bl.y, bl.r * 3);
         g.addColorStop(0, 'rgba(255, 100, 100, 1)');
         g.addColorStop(0.5, 'rgba(255, 23, 68, 0.6)');
@@ -1129,7 +1126,6 @@
         ctx.arc(bl.x, bl.y, bl.r * 3, 0, Math.PI * 2);
         ctx.fill();
 
-        // Ядро
         ctx.fillStyle = '#fff';
         ctx.shadowColor = '#ff1744';
         ctx.shadowBlur = 12;
@@ -1137,7 +1133,6 @@
         ctx.arc(bl.x + wob, bl.y, bl.r, 0, Math.PI * 2);
         ctx.fill();
 
-        // Хвостик сверху
         ctx.shadowBlur = 0;
         ctx.strokeStyle = 'rgba(255, 100, 100, 0.7)';
         ctx.lineWidth = 2;
@@ -1176,16 +1171,19 @@
 
     function render() {
         drawBackground();
-        for (const b of bricks) if (b.alive) drawBrick(b);
-        for (const p of powerups) drawPowerup(p);
 
-        // Снаряды — под платформой, чтобы щит их "перекрывал"
-        for (const bl of bullets) drawBullet(bl);
+        for (let i = 0; i < bricks.length; i++) {
+            if (bricks[i].alive) drawBrick(bricks[i]);
+        }
+        for (let i = 0; i < powerups.length; i++) drawPowerup(powerups[i]);
+        for (let i = 0; i < bullets.length; i++) drawBullet(bullets[i]);
 
         drawPaddle();
-        for (const ball of balls) drawBall(ball);
 
-        for (const p of particles) {
+        for (let i = 0; i < balls.length; i++) drawBall(balls[i]);
+
+        for (let i = 0; i < particles.length; i++) {
+            const p = particles[i];
             const alpha = Math.max(0, p.life / p.maxLife);
             ctx.globalAlpha = alpha;
             ctx.fillStyle = p.color;
@@ -1223,7 +1221,7 @@
         const lr = Math.round(r + (255 - r) * amount);
         const lg = Math.round(g + (255 - g) * amount);
         const lb = Math.round(b + (255 - b) * amount);
-        return `rgb(${lr},${lg},${lb})`;
+        return 'rgb(' + lr + ',' + lg + ',' + lb + ')';
     }
 
     function loop(now) {
