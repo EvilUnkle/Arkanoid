@@ -311,7 +311,7 @@
         resumeAudio();
         score = 0;
         lives = 3;
-        level = 1;
+        level = 2;
         activeBuffs.widen = 0;
         activeBuffs.slow = 0;
         activeBuffs.doubleScore = 0;
