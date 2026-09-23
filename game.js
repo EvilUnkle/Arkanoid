@@ -173,18 +173,57 @@
 
         const density = Math.min(0.7 + (level - 1) * 0.05, 0.95);
         const hardChance = Math.min(0.05 + (level - 1) * 0.08, 0.4);
-        // Шанс врага — с уровня 2, ~7%
-        const enemyChance = level >= 2 ? Math.min(0.06 + (level - 2) * 0.02, 0.18) : 0;
 
-        // Враги не могут быть в самом нижнем ряду (иначе сразу стреляют)
+        // ===== Сколько врагов гарантированно должно быть =====
+        // Уровень 1 — 0, уровень 2 — 2, уровень 3 — 3, дальше растёт
+        let enemiesToPlace = 0;
+        if (level === 2) enemiesToPlace = 2;
+        else if (level === 3) enemiesToPlace = 3;
+        else if (level >= 4) enemiesToPlace = Math.min(3 + Math.floor((level - 3) / 2), 6);
+
+        // Врагов можно ставить только в ряды, где ниже есть минимум 2 ряда
+        // (чтобы колонка для выстрела была)
+        const enemyRowLimit = rows - 2;
+
+        // Собираем все подходящие позиции (row < enemyRowLimit)
+        const candidatePositions = [];
+        for (let row = 0; row < enemyRowLimit; row++) {
+            for (let col = 0; col < BRICK_COLS; col++) {
+                candidatePositions.push({ row, col });
+            }
+        }
+        // Перемешиваем Фишером-Йетсом
+        for (let i = candidatePositions.length - 1; i > 0; i--) {
+            const j = Math.floor(Math.random() * (i + 1));
+            [candidatePositions[i], candidatePositions[j]] = [candidatePositions[j], candidatePositions[i]];
+        }
+
+        // Отмечаем позиции врагов (row-col)
+        const enemyPositions = new Set();
+        // Стараемся не ставить двух врагов в одну колонку — иначе проигрыш слишком лёгкий
+        const usedCols = new Set();
+        for (const pos of candidatePositions) {
+            if (enemyPositions.size >= enemiesToPlace) break;
+            if (usedCols.has(pos.col)) continue;
+            enemyPositions.add(`${pos.row}-${pos.col}`);
+            usedCols.add(pos.col);
+        }
+        // Если после фильтра по колонкам не хватило — добираем любые
+        if (enemyPositions.size < enemiesToPlace) {
+            for (const pos of candidatePositions) {
+                if (enemyPositions.size >= enemiesToPlace) break;
+                enemyPositions.add(`${pos.row}-${pos.col}`);
+            }
+        }
+
+        // Основной проход
         for (let row = 0; row < rows; row++) {
             for (let col = 0; col < BRICK_COLS; col++) {
-                if (Math.random() > density) continue;
+                // Плотность отсеивает колонки, но врагов ставим принудительно
+                const isForcedEnemy = enemyPositions.has(`${row}-${col}`);
+                if (!isForcedEnemy && Math.random() > density) continue;
 
-                // Враг только в верхних рядах (не последний и не предпоследний)
-                const canBeEnemy = row < rows - 2;
-
-                if (canBeEnemy && Math.random() < enemyChance) {
+                if (isForcedEnemy) {
                     bricks.push({
                         col, row,
                         x: padding + col * (brickW + padding),
@@ -195,8 +234,8 @@
                         hp: 1, maxHp: 1,
                         color: '#ff1744',
                         isEnemy: true,
-                        fireCooldown: 2 + Math.random() * 3,   // первый выстрел через 2-5 сек
-                        fireInterval: 3 + Math.random() * 2,    // дальше каждые 3-5 сек
+                        fireCooldown: 2 + Math.random() * 3,
+                        fireInterval: 3 + Math.random() * 2,
                         pulse: Math.random() * Math.PI * 2,
                         spawnAnim: 0,
                         spawnDelay: row * 0.05 + col * 0.015
@@ -223,6 +262,7 @@
             }
         }
 
+        // Страховка от слишком пустого поля
         if (bricks.length < 8) {
             for (let row = 0; row < 3 && bricks.length < 8; row++) {
                 for (let col = 0; col < BRICK_COLS && bricks.length < 8; col++) {
@@ -248,16 +288,6 @@
         aliveBricksCount = bricks.length;
         paddle.curvature = 0;
         paddle.targetCurvature = 0;
-    }
-
-    // Проверка: есть ли между врагом и платформой свободный путь вниз
-    function hasClearPathToBottom(brick) {
-        // Ищем любой живой кирпич в той же колонке ниже этого
-        for (const other of bricks) {
-            if (!other.alive) continue;
-            if (other.col === brick.col && other.row > brick.row) return false;
-        }
-        return true;
     }
 
     function createBall(x, y) {
