@@ -10,13 +10,44 @@
     const overlayTitle = document.getElementById('overlay-title');
     const overlayText = document.getElementById('overlay-text');
     const startBtn = document.getElementById('start-btn');
+    const resetBtn = document.getElementById('reset-btn');
+    const levelSelect = document.getElementById('level-select');
+    const levelGrid = document.getElementById('level-grid');
     const buffsEl = document.getElementById('buffs');
     const pauseBtn = document.getElementById('pause-btn');
     const soundBtn = document.getElementById('sound-btn');
 
-    // ⚠️ ТЕСТ: старт сразу со 2 уровня, чтобы увидеть врагов
-    // Когда закончишь тестировать — поменяй на 1
-    const START_LEVEL = 2;
+    // ===== Прогресс =====
+    const STORAGE_KEY = 'arcanoid_progress_v1';
+    const MAX_LEVELS = 20;
+
+    function loadProgress() {
+        try {
+            const raw = localStorage.getItem(STORAGE_KEY);
+            if (!raw) return { maxLevel: 1 };
+            const data = JSON.parse(raw);
+            return {
+                maxLevel: Math.max(1, Math.min(MAX_LEVELS, data.maxLevel || 1))
+            };
+        } catch (_) {
+            return { maxLevel: 1 };
+        }
+    }
+
+    function saveProgress(progress) {
+        try {
+            localStorage.setItem(STORAGE_KEY, JSON.stringify(progress));
+        } catch (_) {}
+    }
+
+    let progress = loadProgress();
+
+    function unlockLevel(lvl) {
+        if (lvl > progress.maxLevel) {
+            progress.maxLevel = Math.min(MAX_LEVELS, lvl);
+            saveProgress(progress);
+        }
+    }
 
     let W = 0, H = 0, DPR = 1;
 
@@ -33,7 +64,7 @@
     const BRICK_COLS = 8;
     const BRICK_ROWS = 5;
 
-    let state = 'idle';
+    let state = 'idle'; // idle | playing | paused | gameover | win | menu
     let score = 0;
     let lives = 3;
     let level = 1;
@@ -164,7 +195,6 @@
         });
     }
 
-    // Безопасный подсчёт нужного числа врагов (без while-циклов)
     function enemiesForLevel(lvl) {
         if (lvl <= 1) return 0;
         if (lvl === 2) return 2;
@@ -186,19 +216,15 @@
         const density = Math.min(0.7 + (level - 1) * 0.05, 0.95);
         const hardChance = Math.min(0.05 + (level - 1) * 0.08, 0.4);
 
-        // === 1) Готовим список врагов (строки-колонки) ===
         const enemiesToPlace = enemiesForLevel(level);
-        const enemyRowLimit = Math.max(1, rows - 2); // только верхние ряды
+        const enemyRowLimit = Math.max(1, rows - 2);
 
-        // Собираем все кандидатные позиции (row < enemyRowLimit)
         const candidates = [];
         for (let row = 0; row < enemyRowLimit; row++) {
             for (let col = 0; col < BRICK_COLS; col++) {
                 candidates.push({ row, col });
             }
         }
-
-        // Простая перетасовка (Fisher-Yates)
         for (let i = candidates.length - 1; i > 0; i--) {
             const j = Math.floor(Math.random() * (i + 1));
             const tmp = candidates[i];
@@ -206,7 +232,6 @@
             candidates[j] = tmp;
         }
 
-        // Отбираем врагов: сначала в разные колонки, потом — любые оставшиеся
         const enemySet = new Set();
         const usedCols = new Set();
         for (let i = 0; i < candidates.length && enemySet.size < enemiesToPlace; i++) {
@@ -220,13 +245,10 @@
             enemySet.add(p.row + '-' + p.col);
         }
 
-        // === 2) Основной проход по сетке ===
         for (let row = 0; row < rows; row++) {
             for (let col = 0; col < BRICK_COLS; col++) {
                 const key = row + '-' + col;
                 const forcedEnemy = enemySet.has(key);
-
-                // Если это не форсированный враг — может быть отсеян по плотности
                 if (!forcedEnemy && Math.random() > density) continue;
 
                 const baseX = padding + col * (brickW + padding);
@@ -267,11 +289,8 @@
             }
         }
 
-        // === 3) Страховка: если поле совсем пустое, добавляем ряд сверху ===
-        // (проверка без вложенных "пока не наберём 8" — просто разовая)
         if (bricks.length < 8) {
             for (let col = 0; col < BRICK_COLS; col++) {
-                const key = '0-' + col;
                 if (bricks.some(b => b.row === 0 && b.col === col)) continue;
                 bricks.push({
                     col, row: 0,
@@ -320,11 +339,12 @@
         balls.push(createBall(W / 2, paddle.y - 8));
     }
 
-    function startGame() {
+    // ===== Запуск уровня =====
+    function startLevel(lvl) {
         resumeAudio();
+        level = Math.max(1, Math.min(MAX_LEVELS, lvl));
         score = 0;
         lives = 3;
-        level = START_LEVEL;
         activeBuffs.widen = 0;
         activeBuffs.slow = 0;
         activeBuffs.doubleScore = 0;
@@ -335,13 +355,14 @@
         paddle.w = paddle.baseW;
         paddle.curvature = 0;
         paddle.targetCurvature = 0;
-        updateHUD();
-        createBricks();
         paddle.x = (W - paddle.w) / 2;
         paddle.targetX = paddle.x;
+        updateHUD();
+        createBricks();
         resetBall();
         state = 'playing';
         overlay.classList.add('hidden');
+        overlay.classList.remove('game-end');
         updateBuffsUI();
         lastTime = performance.now();
         if (animationId) cancelAnimationFrame(animationId);
@@ -350,6 +371,11 @@
 
     function nextLevel() {
         SFX.win();
+        unlockLevel(level + 1);
+        if (level >= MAX_LEVELS) {
+            showWinScreen();
+            return;
+        }
         level++;
         activeBuffs.widen = 0;
         activeBuffs.slow = 0;
@@ -374,7 +400,7 @@
         updateHUD();
         if (lives <= 0) {
             state = 'gameover';
-            showOverlay('Игра окончена', 'Твой счёт: ' + score, 'Заново');
+            showGameOverScreen();
         } else {
             activeBuffs.widen = 0;
             activeBuffs.slow = 0;
@@ -389,7 +415,112 @@
         }
     }
 
+    // ===== Оверлеи =====
+    function hideAllOverlayExtras() {
+        if (levelSelect) levelSelect.style.display = 'none';
+        if (resetBtn) resetBtn.style.display = 'none';
+        overlay.classList.remove('game-end');
+    }
+
+    function showMenuOverlay() {
+        state = 'idle';
+        overlay.classList.remove('hidden');
+        overlay.classList.remove('game-end');
+        overlayTitle.textContent = 'Арканоид';
+        if (progress.maxLevel > 1) {
+            overlayText.textContent = 'Прогресс: уровень ' + progress.maxLevel + ' из ' + MAX_LEVELS;
+            startBtn.textContent = 'Продолжить с ' + progress.maxLevel;
+        } else {
+            overlayText.textContent = 'Управляй платформой пальцем';
+            startBtn.textContent = 'Играть';
+        }
+        if (levelSelect) levelSelect.style.display = 'block';
+        if (resetBtn) resetBtn.style.display = progress.maxLevel > 1 ? 'block' : 'none';
+        buildLevelGrid();
+    }
+
+    function buildLevelGrid() {
+        if (!levelGrid) return;
+        levelGrid.innerHTML = '';
+        for (let i = 1; i <= MAX_LEVELS; i++) {
+            const cell = document.createElement('button');
+            cell.className = 'level-cell';
+            const unlocked = i <= progress.maxLevel;
+            const isCurrent = i === progress.maxLevel;
+            if (unlocked) {
+                cell.classList.add('unlocked');
+                if (isCurrent) cell.classList.add('current');
+                cell.innerHTML = '<span class="num">' + i + '</span>';
+                cell.addEventListener('click', () => startLevel(i));
+            } else {
+                cell.classList.add('locked');
+                cell.innerHTML = '<span class="lock">🔒</span>';
+                cell.disabled = true;
+            }
+            levelGrid.appendChild(cell);
+        }
+    }
+
+    function showGameOverScreen() {
+        overlay.classList.remove('hidden');
+        overlay.classList.add('game-end');
+        overlayTitle.textContent = 'Игра окончена';
+        overlayText.textContent = 'Очки: ' + score + ' • Уровень ' + level;
+        if (levelSelect) levelSelect.style.display = 'none';
+        if (resetBtn) resetBtn.style.display = 'none';
+
+        startBtn.textContent = 'Ещё раз';
+        startBtn.onclick = () => startLevel(level);
+
+        // Кнопка "К уровням" — создаём динамически один раз
+        let backBtn = document.getElementById('back-to-menu-btn');
+        if (!backBtn) {
+            backBtn = document.createElement('button');
+            backBtn.id = 'back-to-menu-btn';
+            backBtn.className = 'secondary-btn';
+            backBtn.textContent = 'К уровням';
+            backBtn.addEventListener('click', () => {
+                startBtn.onclick = defaultStartClick;
+                showMenuOverlay();
+            });
+            startBtn.parentNode.appendChild(backBtn);
+        }
+        backBtn.style.display = 'block';
+    }
+
+    function showWinScreen() {
+        state = 'win';
+        overlay.classList.remove('hidden');
+        overlay.classList.add('game-end');
+        overlayTitle.textContent = '🏆 Победа!';
+        overlayText.textContent = 'Ты прошёл все ' + MAX_LEVELS + ' уровней!';
+        if (levelSelect) levelSelect.style.display = 'none';
+        if (resetBtn) resetBtn.style.display = 'none';
+
+        startBtn.textContent = 'Начать заново';
+        startBtn.onclick = () => startLevel(1);
+
+        let backBtn = document.getElementById('back-to-menu-btn');
+        if (!backBtn) {
+            backBtn = document.createElement('button');
+            backBtn.id = 'back-to-menu-btn';
+            backBtn.className = 'secondary-btn';
+            backBtn.textContent = 'К уровням';
+            backBtn.addEventListener('click', () => {
+                startBtn.onclick = defaultStartClick;
+                showMenuOverlay();
+            });
+            startBtn.parentNode.appendChild(backBtn);
+        }
+        backBtn.style.display = 'block';
+    }
+
+    function defaultStartClick() {
+        startLevel(progress.maxLevel);
+    }
+
     function showOverlay(title, text, btn) {
+        // fallback, используется редко
         overlayTitle.textContent = title;
         overlayText.textContent = text;
         startBtn.textContent = btn;
@@ -441,7 +572,6 @@
         };
     }
 
-    // ===== Бонусы =====
     function pickPowerupType() {
         const total = POWERUP_TYPES.reduce((s, p) => s + p.weight, 0);
         let r = Math.random() * total;
@@ -503,7 +633,6 @@
         updateBuffsUI();
     }
 
-    // ===== Частицы =====
     function spawnParticles(x, y, color, count) {
         for (let i = 0; i < count; i++) {
             const angle = Math.random() * Math.PI * 2;
@@ -520,7 +649,7 @@
         }
     }
 
-    // ===== Управление =====
+    // ===== Слушатели =====
     canvas.addEventListener('pointerdown', (e) => {
         resumeAudio();
         if (state !== 'playing' && state !== 'paused') return;
@@ -574,12 +703,24 @@
         });
     }
 
+    if (resetBtn) {
+        resetBtn.addEventListener('click', () => {
+            if (confirm('Сбросить прогресс? Все открытые уровни будут закрыты.')) {
+                progress = { maxLevel: 1 };
+                saveProgress(progress);
+                showMenuOverlay();
+            }
+        });
+    }
+
+    // Стартовая кнопка — обработчик по умолчанию
+    startBtn.onclick = defaultStartClick;
+
     // ===== Обновление =====
     function update(dt) {
         time += dt;
         if (state !== 'playing') return;
 
-        // Таймеры бонусов
         let buffsChanged = false;
         for (const key of ['widen', 'slow', 'doubleScore', 'shield']) {
             if (activeBuffs[key] > 0) {
@@ -603,7 +744,6 @@
         paddle.targetX = Math.max(0, Math.min(W - paddle.w, paddle.targetX));
         paddle.x = paddle.targetX;
 
-        // Кривизна
         paddle.targetCurvature = computeTargetCurvature();
         const bendSpeed = 1.2;
         const prevCurv = paddle.curvature;
@@ -620,7 +760,6 @@
 
         if (buffsChanged || paddle.curvature > 0.05) updateBuffsUI();
 
-        // Анимация появления кирпичей
         for (let i = 0; i < bricks.length; i++) {
             const b = bricks[i];
             if (b.spawnAnim < 1) {
@@ -631,14 +770,12 @@
 
         if (paddle.hitFlash > 0) paddle.hitFlash = Math.max(0, paddle.hitFlash - dt * 4);
 
-        // ===== Враги стреляют =====
+        // Враги стреляют
         for (let i = 0; i < bricks.length; i++) {
             const b = bricks[i];
             if (!b.alive || !b.isEnemy || b.spawnAnim < 1) continue;
             b.pulse += dt * 4;
-
             if (!hasClearPathToBottom(b)) continue;
-
             b.fireCooldown -= dt;
             if (b.fireCooldown <= 0) {
                 b.fireCooldown = b.fireInterval;
@@ -655,7 +792,7 @@
             }
         }
 
-        // ===== Движение снарядов =====
+        // Снаряды
         for (let i = bullets.length - 1; i >= 0; i--) {
             const bl = bullets[i];
             bl.y += bl.vy * dt;
@@ -694,11 +831,10 @@
             }
         }
 
-        // ===== Движение мячей =====
+        // Мячи
         const speedMul = activeBuffs.slow > 0 ? 0.75 : 1.0;
         const steps = 3;
         const subDt = (dt / steps) * speedMul;
-
         const arc = paddleArc();
 
         for (let bi = balls.length - 1; bi >= 0; bi--) {
@@ -719,7 +855,6 @@
                 if (ball.x + ball.r > W) { ball.x = W - ball.r; ball.dx = -Math.abs(ball.dx); SFX.wall(); }
                 if (ball.y - ball.r < 0) { ball.y = ball.r; ball.dy = Math.abs(ball.dy); SFX.wall(); }
 
-                // Платформа
                 if (ball.dy > 0 &&
                     ball.x + ball.r >= paddle.x &&
                     ball.x - ball.r <= paddle.x + paddle.w) {
@@ -761,7 +896,6 @@
                     }
                 }
 
-                // Кирпичи
                 for (let k = 0; k < bricks.length; k++) {
                     const b = bricks[k];
                     if (!b.alive) continue;
@@ -818,7 +952,6 @@
             return;
         }
 
-        // Бонусы
         for (let i = powerups.length - 1; i >= 0; i--) {
             const p = powerups[i];
             p.y += p.dy * dt;
@@ -836,7 +969,6 @@
             if (p.y > H) powerups.splice(i, 1);
         }
 
-        // Частицы
         for (let i = particles.length - 1; i >= 0; i--) {
             const pt = particles[i];
             pt.life -= dt;
@@ -922,9 +1054,7 @@
                 ctx.beginPath();
                 ctx.arc(b.w / 2, b.h / 2, 5 + pulse * 4, 0, Math.PI * 2);
                 ctx.stroke();
-            }
 
-            if (ready) {
                 const total = b.fireInterval;
                 const left = Math.max(0, b.fireCooldown);
                 const ratio = 1 - left / total;
@@ -1063,9 +1193,7 @@
             ctx.stroke();
         }
 
-        if (activeBuffs.shield > 0) {
-            drawShield();
-        }
+        if (activeBuffs.shield > 0) drawShield();
     }
 
     function drawShield() {
@@ -1234,12 +1362,14 @@
         }
     }
 
-    startBtn.addEventListener('click', startGame);
     window.addEventListener('resize', resize);
     window.addEventListener('orientationchange', () => setTimeout(resize, 200));
 
     resize();
     render();
+
+    // Показать стартовое меню
+    showMenuOverlay();
 
     document.addEventListener('visibilitychange', () => {
         if (document.hidden && state === 'playing') {
